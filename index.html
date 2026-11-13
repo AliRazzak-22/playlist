@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>لوحة إدارة الشاشات</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="boot-view" class="boot">
+    <div class="spinner" aria-hidden="true"></div>
+    <p>جاري التحميل…</p>
+  </div>
+
+  <div id="login-view" class="login" hidden>
+    <section class="pin-card" aria-labelledby="pin-title">
+      <div class="pin-lock" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v3"/></svg>
+      </div>
+      <h1 id="pin-title">لوحة إدارة الشاشات</h1>
+      <p class="pin-subtitle">أدخل رمز الدخول</p>
+      <div id="pin-dots" class="pin-dots" dir="ltr" role="status" aria-live="polite"></div>
+      <div id="pin-keypad" class="pin-keypad" dir="ltr" role="group" aria-label="لوحة أرقام رمز الدخول">
+        <button type="button" class="pin-key" data-digit="1" aria-label="1"><span>1</span><small aria-hidden="true">&nbsp;</small></button>
+        <button type="button" class="pin-key" data-digit="2" aria-label="2"><span>2</span><small aria-hidden="true">ABC</small></button>
+        <button type="button" class="pin-key" data-digit="3" aria-label="3"><span>3</span><small aria-hidden="true">DEF</small></button>
+        <button type="button" class="pin-key" data-digit="4" aria-label="4"><span>4</span><small aria-hidden="true">GHI</small></button>
+        <button type="button" class="pin-key" data-digit="5" aria-label="5"><span>5</span><small aria-hidden="true">JKL</small></button>
+        <button type="button" class="pin-key" data-digit="6" aria-label="6"><span>6</span><small aria-hidden="true">MNO</small></button>
+        <button type="button" class="pin-key" data-digit="7" aria-label="7"><span>7</span><small aria-hidden="true">PQRS</small></button>
+        <button type="button" class="pin-key" data-digit="8" aria-label="8"><span>8</span><small aria-hidden="true">TUV</small></button>
+        <button type="button" class="pin-key" data-digit="9" aria-label="9"><span>9</span><small aria-hidden="true">WXYZ</small></button>
+        <span aria-hidden="true"></span>
+        <button type="button" class="pin-key" data-digit="0" aria-label="0"><span>0</span></button>
+        <button type="button" id="pin-delete" class="pin-delete" aria-label="حذف آخر رقم"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5h11v14H9l-7-7z"/><path d="m12 9 6 6m0-6-6 6"/></svg></button>
+      </div>
+      <p id="pin-status" class="pin-status" role="status" aria-live="polite"></p>
+      <p id="login-error" class="form-error pin-error" role="alert" hidden></p>
+      <details class="pin-help">
+        <summary>أول مرة تفتح اللوحة؟</summary>
+        <p>بـ Firebase افتح Authentication ثم Sign-in method، وفعّل Anonymous. ما تحتاج بريد أو كلمة سر.</p>
+        <p>بعد فتح اللوحة، انشر القواعد من تبويب الحماية مرة وحدة حتى يصير لهذا المتصفح صلاحية التحكم.</p>
+      </details>
+    </section>
+  </div>
+
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" data-icon="screen"></span>
+        <strong>لوحة إدارة الشاشات</strong>
+      </div>
+      <div class="topbar-side">
+        <span id="conn-badge" class="pill muted">جاري الاتصال…</span>
+        <span class="user-email">لوحة المدير</span>
+        <button id="logout-btn" type="button" class="btn ghost sm">قفل اللوحة</button>
+      </div>
+    </header>
+
+    <div id="global-banner" class="banner" hidden></div>
+
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="screens" class="active">الشاشات</button>
+      <button type="button" role="tab" data-tab="playlist">قائمة التشغيل</button>
+      <button type="button" role="tab" data-tab="control">التحكم والإعدادات</button>
+      <button type="button" role="tab" data-tab="update">تحديث التطبيق</button>
+      <button type="button" role="tab" data-tab="security">الحماية</button>
+    </nav>
+
+    <main>
+      <section id="tab-screens" class="tab-panel active" role="tabpanel">
+        <div class="stats">
+          <div class="stat"><span>كل الشاشات</span><strong id="stat-total">0</strong></div>
+          <div class="stat ok"><span>متصلة</span><strong id="stat-online">0</strong></div>
+          <div class="stat bad"><span>غير متصلة</span><strong id="stat-offline">0</strong></div>
+          <div class="stat"><span>تعرض فيديو هسه</span><strong id="stat-playing">0</strong></div>
+        </div>
+        <div class="toolbar">
+          <input id="device-search" type="search" placeholder="ابحث باسم الشاشة أو الرمز…">
+          <div class="segmented" id="device-filter">
+            <button type="button" data-filter="all" class="active">الكل</button>
+            <button type="button" data-filter="online">المتصلة</button>
+            <button type="button" data-filter="offline">غير المتصلة</button>
+          </div>
+        </div>
+        <div id="device-grid" class="device-grid"></div>
+        <div id="device-empty" class="empty" hidden>
+          <span data-icon="screen"></span>
+          <h3>ما كو شاشات بعد</h3>
+          <p>نصّب التطبيق على الشاشة وافتحه مرة وحدة، وراح تطلع هنا تلقائياً خلال دقيقة.</p>
+        </div>
+        <div id="device-no-match" class="empty small" hidden>ما كو شاشة تطابق البحث.</div>
+      </section>
+
+      <section id="tab-playlist" class="tab-panel" role="tabpanel">
+        <div class="card">
+          <div class="card-head">
+            <h2>قائمة التشغيل العامة</h2>
+            <p>تشتغل على كل الشاشات اللي ما عدها قائمة خاصة. الفيديوهات تنعاد من الأول بعد آخر فيديو بدون توقف.</p>
+          </div>
+          <div id="global-playlist"></div>
+        </div>
+      </section>
+
+      <section id="tab-control" class="tab-panel" role="tabpanel">
+        <div class="card">
+          <div class="card-head">
+            <h2>أوامر لكل الشاشات</h2>
+            <p>الأمر يوصل لكل الشاشات المتصلة خلال ثواني.</p>
+          </div>
+          <div id="global-commands" class="command-grid"></div>
+        </div>
+
+        <form id="config-form" class="card" novalidate>
+          <div class="card-head">
+            <h2>إعدادات الشاشات</h2>
+            <p>تنطبق على كل الشاشات.</p>
+          </div>
+          <div class="field">
+            <span>مستوى الصوت: <b id="volume-value">100%</b></span>
+            <input id="cfg-volume" type="range" min="0" max="100" step="5" value="100">
+          </div>
+          <label class="check">
+            <input id="cfg-muted" type="checkbox">
+            <span>كتم الصوت بكل الشاشات</span>
+          </label>
+          <label class="field narrow">
+            <span>فحص التحديثات كل (دقيقة)</span>
+            <input id="cfg-interval" type="number" min="5" max="10080" step="1" value="30" dir="ltr">
+          </label>
+          <p id="config-error" class="form-error" hidden></p>
+          <div class="form-actions">
+            <span id="config-state" class="muted-text"></span>
+            <button type="submit" class="btn primary" id="config-save">حفظ الإعدادات</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="tab-update" class="tab-panel" role="tabpanel">
+        <div class="card">
+          <div class="card-head">
+            <h2>التحديث المنشور حالياً</h2>
+          </div>
+          <div id="current-update"></div>
+        </div>
+
+        <form id="update-form" class="card" novalidate>
+          <div class="card-head">
+            <h2>نشر تحديث جديد</h2>
+            <p>ارفع ملف APK الجديد على استضافة تعطي رابط https مباشر، وبعدين عبّي المعلومات. الشاشات تنزّله وتطلب التثبيت؛ بعض أجهزة Android تحتاج موافقة من الشاشة.</p>
+          </div>
+          <label class="field narrow">
+            <span>رقم الإصدار (versionCode)</span>
+            <input id="upd-code" type="number" min="1" step="1" required dir="ltr">
+            <small>لازم يكون نفس الرقم المكتوب بملف <code>app/build.gradle.kts</code> للنسخة الجديدة، وأكبر من الرقم الحالي.</small>
+          </label>
+          <label class="field">
+            <span>رابط ملف APK</span>
+            <input id="upd-url" type="url" placeholder="https://…/app-release.apk" required dir="ltr">
+          </label>
+          <label class="field">
+            <span>بصمة الملف SHA-256 (اختياري، لكن ننصح بيها)</span>
+            <input id="upd-sha" type="text" maxlength="64" placeholder="تنحسب تلقائياً من الملف" dir="ltr">
+          </label>
+          <div class="file-hash">
+            <label class="btn ghost sm" for="upd-file">احسب البصمة من ملف APK</label>
+            <input id="upd-file" type="file" accept=".apk,application/vnd.android.package-archive" hidden>
+            <span id="upd-file-info" class="muted-text"></span>
+          </div>
+          <p id="update-error" class="form-error" hidden></p>
+          <div class="form-actions">
+            <button type="submit" class="btn primary">نشر التحديث</button>
+          </div>
+        </form>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>إصدارات الشاشات</h2>
+          </div>
+          <div id="version-table"></div>
+        </div>
+      </section>
+
+      <section id="tab-security" class="tab-panel" role="tabpanel">
+        <div class="card">
+          <div class="card-head">
+            <h2>حماية قاعدة البيانات</h2>
+            <p>هاي القواعد تعطي لهذا المتصفح وحده صلاحية تغيير الفيديوهات والأوامر والإعدادات. ما تحتاج حساب بريد؛ Firebase ينشئ تعريف تلقائي للمتصفح. قراءة روابط الفيديوهات والتحديثات تبقى عامة حتى الشاشات تكدر توصل إلها.</p>
+            <p>رمز الدخول قفل محلي للواجهة وموجود في ملفاتها، مو كلمة سر للخادم. لا تمسح بيانات المتصفح أو تبدّل المتصفح؛ إذا صار تعريف جديد، تحتاج تنشر قواعده مرة ثانية. نشر قواعد متصفح جديد بدل القديمة يلغي صلاحية المتصفح السابق.</p>
+            <p>تقارير حالة الشاشات تُرسل بدون تسجيل دخول للجهاز، لذلك ممكن طرف آخر يزوّر حالة شاشة إذا عرف رمزها الكامل. لا تعتبر علامة «متصلة» إثبات هوية؛ توثيق الأجهزة يحتاج ربط آمن إضافي.</p>
+          </div>
+          <div id="rules-status" class="rules-status"></div>
+          <ol class="steps">
+            <li>اضغط زر <b>نسخ القواعد</b> اللي جوة.</li>
+            <li>افتح <a href="https://console.firebase.google.com/project/send-files-to-tv-d371a/database/send-files-to-tv-d371a-default-rtdb/rules" target="_blank" rel="noopener">صفحة القواعد بـ Firebase</a>.</li>
+            <li>امسح كل النص الموجود هناك، والصق القواعد مكانه.</li>
+            <li>اضغط <b>Publish</b>، وبعدها ارجع هنا واضغط <b>فحص مرة ثانية</b>.</li>
+          </ol>
+          <p class="muted-text">تعريف هذا المتصفح (UID): <code id="admin-uid" dir="ltr"></code></p>
+          <textarea id="rules-text" class="code" rows="14" readonly dir="ltr" spellcheck="false"></textarea>
+          <div class="form-actions">
+            <button type="button" class="btn ghost" id="rules-recheck">فحص مرة ثانية</button>
+            <button type="button" class="btn primary" id="rules-copy">نسخ القواعد</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="modal" class="modal"></dialog>
+  <dialog id="confirm" class="modal"></dialog>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-database-compat.js"></script>
+  <script src="rules.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
