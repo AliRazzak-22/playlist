@@ -39,11 +39,7 @@
       </div>
       <p id="pin-status" class="pin-status" role="status" aria-live="polite"></p>
       <p id="login-error" class="form-error pin-error" role="alert" hidden></p>
-      <details class="pin-help">
-        <summary>أول مرة تفتح اللوحة؟</summary>
-        <p>بـ Firebase افتح Authentication ثم Sign-in method، وفعّل Anonymous. ما تحتاج بريد أو كلمة سر.</p>
-        <p>بعد فتح اللوحة، انشر القواعد من تبويب الحماية مرة وحدة حتى يصير لهذا المتصفح صلاحية التحكم.</p>
-      </details>
+      <p class="pin-help">رمز من 9 أرقام، يتحقق منه Firebase. تقدر تدير الشاشات من أي متصفح بالرمز. الجلسة تنقفل بعد 8 ساعات أو عند إعادة تحميل الصفحة.</p>
     </section>
   </div>
 
@@ -67,7 +63,7 @@
       <button type="button" role="tab" data-tab="playlist">قائمة التشغيل</button>
       <button type="button" role="tab" data-tab="control">التحكم والإعدادات</button>
       <button type="button" role="tab" data-tab="update">تحديث التطبيق</button>
-      <button type="button" role="tab" data-tab="security">الحماية</button>
+      <button type="button" role="tab" data-tab="library">مكتبة الوسائط</button>
     </nav>
 
     <main>
@@ -76,7 +72,7 @@
           <div class="stat"><span>كل الشاشات</span><strong id="stat-total">0</strong></div>
           <div class="stat ok"><span>متصلة</span><strong id="stat-online">0</strong></div>
           <div class="stat bad"><span>غير متصلة</span><strong id="stat-offline">0</strong></div>
-          <div class="stat"><span>تعرض فيديو هسه</span><strong id="stat-playing">0</strong></div>
+          <div class="stat"><span>تعرض هسه</span><strong id="stat-playing">0</strong></div>
         </div>
         <div class="toolbar">
           <input id="device-search" type="search" placeholder="ابحث باسم الشاشة أو الرمز…">
@@ -90,7 +86,7 @@
         <div id="device-empty" class="empty" hidden>
           <span data-icon="screen"></span>
           <h3>ما كو شاشات بعد</h3>
-          <p>نصّب التطبيق على الشاشة وافتحه مرة وحدة، وراح تطلع هنا تلقائياً خلال دقيقة.</p>
+          <p>حدّث تطبيق الشاشة (APK) إلى الإصدار 2 أو أحدث وافتحه. افحص تشخيص الاتصال السحابي الظاهر على التلفزيون إذا ما ظهرت الشاشة هنا.</p>
         </div>
         <div id="device-no-match" class="empty small" hidden>ما كو شاشة تطابق البحث.</div>
       </section>
@@ -99,13 +95,21 @@
         <div class="card">
           <div class="card-head">
             <h2>قائمة التشغيل العامة</h2>
-            <p>تشتغل على كل الشاشات اللي ما عدها قائمة خاصة. الفيديوهات تنعاد من الأول بعد آخر فيديو بدون توقف.</p>
+            <p>تشتغل على كل الشاشات اللي ما عدها قائمة خاصة. اختَر فيديوهات وصور من المكتبة، رتّبها وحدّد مدة الصور والتلاشي ثم احفظ.</p>
           </div>
           <div id="global-playlist"></div>
         </div>
       </section>
 
       <section id="tab-control" class="tab-panel" role="tabpanel">
+        <div class="card">
+          <div class="card-head">
+            <h2>تزامن الشاشات (نفس الفريم)</h2>
+            <p>كل الشاشات تحسب نفس اللحظة من ساعة مشتركة. الشاشة اللي تنفتح متأخرة تبدي من نفس النقطة، واللي تتأخر تقفز تلقائياً وترجع ويا البقية.</p>
+          </div>
+          <div id="sync-panel"></div>
+        </div>
+
         <div class="card">
           <div class="card-head">
             <h2>أوامر لكل الشاشات</h2>
@@ -131,6 +135,10 @@
             <span>فحص التحديثات كل (دقيقة)</span>
             <input id="cfg-interval" type="number" min="5" max="10080" step="1" value="30" dir="ltr">
           </label>
+          <div class="media-settings">
+            <label class="field"><span>ترتيب التشغيل</span><select id="cfg-order"><option value="sequential">حسب ترتيب القائمة</option><option value="shuffle">عشوائي</option></select></label>
+            <label class="field"><span>طريقة العرض الافتراضية</span><select id="cfg-display"><option value="contain">كامل المحتوى (contain)</option><option value="cover">ملء الشاشة مع قص الأطراف (cover)</option></select></label>
+          </div>
           <p id="config-error" class="form-error" hidden></p>
           <div class="form-actions">
             <span id="config-state" class="muted-text"></span>
@@ -184,27 +192,17 @@
         </div>
       </section>
 
-      <section id="tab-security" class="tab-panel" role="tabpanel">
+      <section id="tab-library" class="tab-panel" role="tabpanel">
         <div class="card">
           <div class="card-head">
-            <h2>حماية قاعدة البيانات</h2>
-            <p>هاي القواعد تعطي لهذا المتصفح وحده صلاحية تغيير الفيديوهات والأوامر والإعدادات. ما تحتاج حساب بريد؛ Firebase ينشئ تعريف تلقائي للمتصفح. قراءة روابط الفيديوهات والتحديثات تبقى عامة حتى الشاشات تكدر توصل إلها.</p>
-            <p>رمز الدخول قفل محلي للواجهة وموجود في ملفاتها، مو كلمة سر للخادم. لا تمسح بيانات المتصفح أو تبدّل المتصفح؛ إذا صار تعريف جديد، تحتاج تنشر قواعده مرة ثانية. نشر قواعد متصفح جديد بدل القديمة يلغي صلاحية المتصفح السابق.</p>
-            <p>تقارير حالة الشاشات تُرسل بدون تسجيل دخول للجهاز، لذلك ممكن طرف آخر يزوّر حالة شاشة إذا عرف رمزها الكامل. لا تعتبر علامة «متصلة» إثبات هوية؛ توثيق الأجهزة يحتاج ربط آمن إضافي.</p>
+            <h2>مكتبة الفيديوهات والصور السحابية</h2>
+            <p>اختَر ملفات من جهازك وتنرفع مجاناً على مستودع GitHub وتتحول لرابط تلقائياً. الفيديو: MP4 أو WebM حتى 95 MiB. الصور: JPEG أو PNG أو WebP حتى 20 MiB. المستودع عام، فلا ترفع شي خاص. الملف ينضاف للمكتبة بعد ما يصير رابطه جاهز (حوالي دقيقة).</p>
           </div>
-          <div id="rules-status" class="rules-status"></div>
-          <ol class="steps">
-            <li>اضغط زر <b>نسخ القواعد</b> اللي جوة.</li>
-            <li>افتح <a href="https://console.firebase.google.com/project/send-files-to-tv-d371a/database/send-files-to-tv-d371a-default-rtdb/rules" target="_blank" rel="noopener">صفحة القواعد بـ Firebase</a>.</li>
-            <li>امسح كل النص الموجود هناك، والصق القواعد مكانه.</li>
-            <li>اضغط <b>Publish</b>، وبعدها ارجع هنا واضغط <b>فحص مرة ثانية</b>.</li>
-          </ol>
-          <p class="muted-text">تعريف هذا المتصفح (UID): <code id="admin-uid" dir="ltr"></code></p>
-          <textarea id="rules-text" class="code" rows="14" readonly dir="ltr" spellcheck="false"></textarea>
-          <div class="form-actions">
-            <button type="button" class="btn ghost" id="rules-recheck">فحص مرة ثانية</button>
-            <button type="button" class="btn primary" id="rules-copy">نسخ القواعد</button>
-          </div>
+          <div id="github-setup"></div>
+          <label class="field"><span>رفع ملفات</span><input id="media-files" type="file" multiple accept="video/mp4,video/webm,image/jpeg,image/png,image/webp"></label>
+          <div id="upload-list" class="upload-list" aria-label="حالة رفع الملفات"></div>
+          <div id="media-library" class="library-grid"></div>
+          <p id="library-empty" class="muted-text" hidden>المكتبة فاضية. اختَر ملفات فيديو أو صور من جهازك للرفع.</p>
         </div>
       </section>
     </main>
@@ -217,7 +215,6 @@
   <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-database-compat.js"></script>
-  <script src="rules.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
