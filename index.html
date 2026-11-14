@@ -4,6 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>لوحة إدارة الشاشات</title>
+  <meta name="theme-color" content="#6b4a2f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="درب الشفاء">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" href="logo.png">
+  <link rel="apple-touch-icon" href="logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap">
@@ -17,9 +23,7 @@
 
   <div id="login-view" class="login" hidden>
     <section class="pin-card" aria-labelledby="pin-title">
-      <div class="pin-lock" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v3"/></svg>
-      </div>
+      <img class="pin-logo" src="logo.png" alt="" width="72" height="72">
       <h1 id="pin-title">لوحة إدارة الشاشات</h1>
       <p class="pin-subtitle">أدخل رمز الدخول</p>
       <div id="pin-dots" class="pin-dots" dir="ltr" role="status" aria-live="polite"></div>
@@ -46,10 +50,11 @@
   <div id="app-view" hidden>
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark" data-icon="screen"></span>
+        <img class="brand-logo" src="logo.png" alt="" width="36" height="36">
         <strong>لوحة إدارة الشاشات</strong>
       </div>
       <div class="topbar-side">
+        <button id="install-btn" type="button" class="btn ghost sm" hidden>تثبيت التطبيق</button>
         <span id="conn-badge" class="pill muted">جاري الاتصال…</span>
         <span class="user-email">لوحة المدير</span>
         <button id="logout-btn" type="button" class="btn ghost sm">قفل اللوحة</button>
@@ -86,7 +91,7 @@
         <div id="device-empty" class="empty" hidden>
           <span data-icon="screen"></span>
           <h3>ما كو شاشات بعد</h3>
-          <p>حدّث تطبيق الشاشة (APK) إلى الإصدار 2 أو أحدث وافتحه. افحص تشخيص الاتصال السحابي الظاهر على التلفزيون إذا ما ظهرت الشاشة هنا.</p>
+          <p>نصّب تطبيق «مُشغل درب الشفاء» الإصدار 1.4.0 أو أحدث على كل شاشة وافتحه (النسخة القديمة ما ترسل حالتها). إذا ما ظهرت الشاشة، افحص تشخيص الاتصال الظاهر على التلفزيون.</p>
         </div>
         <div id="device-no-match" class="empty small" hidden>ما كو شاشة تطابق البحث.</div>
       </section>
@@ -145,6 +150,14 @@
             <button type="submit" class="btn primary" id="config-save">حفظ الإعدادات</button>
           </div>
         </form>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>إطار الشاشة للفيديوهات الطولية (ريلز)</h2>
+            <p>الفيديو الطولي يبقى بالنص بحجمه الطبيعي بدون قص أو تكبير أو ضغط، والفراغ يمينه ويساره يتعبّى بصورتين ثابتتين. أفضل مقاس لكل صورة جانبية 656×1080 بكسل (طولية). الإطار يتطبّق على كل الشاشات.</p>
+          </div>
+          <div id="frame-editor"></div>
+        </div>
       </section>
 
       <section id="tab-update" class="tab-panel" role="tabpanel">
@@ -158,26 +171,26 @@
         <form id="update-form" class="card" novalidate>
           <div class="card-head">
             <h2>نشر تحديث جديد</h2>
-            <p>ارفع ملف APK الجديد على استضافة تعطي رابط https مباشر، وبعدين عبّي المعلومات. الشاشات تنزّله وتطلب التثبيت؛ بعض أجهزة Android تحتاج موافقة من الشاشة.</p>
+            <p>اكتب رقم الإصدار، اختار ملف APK من جهازك، واضغط نشر. الملف ينرفع تلقائياً على GitHub والشاشات تنزّله وتثبّته (بعض الأجهزة تطلب موافقة على الشاشة).</p>
           </div>
           <label class="field narrow">
             <span>رقم الإصدار (versionCode)</span>
             <input id="upd-code" type="number" min="1" step="1" required dir="ltr">
             <small>لازم يكون نفس الرقم المكتوب بملف <code>app/build.gradle.kts</code> للنسخة الجديدة، وأكبر من الرقم الحالي.</small>
           </label>
-          <label class="field">
-            <span>رابط ملف APK</span>
-            <input id="upd-url" type="url" placeholder="https://…/app-release.apk" required dir="ltr">
-          </label>
-          <label class="field">
-            <span>بصمة الملف SHA-256 (اختياري، لكن ننصح بيها)</span>
-            <input id="upd-sha" type="text" maxlength="64" placeholder="تنحسب تلقائياً من الملف" dir="ltr">
-          </label>
           <div class="file-hash">
-            <label class="btn ghost sm" for="upd-file">احسب البصمة من ملف APK</label>
+            <label class="btn primary sm" for="upd-file">اختيار ملف APK</label>
             <input id="upd-file" type="file" accept=".apk,application/vnd.android.package-archive" hidden>
             <span id="upd-file-info" class="muted-text"></span>
           </div>
+          <label class="field">
+            <span>أو رابط جاهز لملف APK (اختياري — اتركه فاضي إذا اخترت الملف)</span>
+            <input id="upd-url" type="url" placeholder="https://…/app-release.apk" dir="ltr">
+          </label>
+          <label class="field">
+            <span>بصمة الملف SHA-256 (تنحسب تلقائياً)</span>
+            <input id="upd-sha" type="text" maxlength="64" placeholder="تنحسب تلقائياً من الملف" dir="ltr">
+          </label>
           <p id="update-error" class="form-error" hidden></p>
           <div class="form-actions">
             <button type="submit" class="btn primary">نشر التحديث</button>

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>player</title>
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  #box { position: absolute; inset: 0; margin: auto; width: 100%; height: 100%; }
+  #box.portrait { width: calc(100vh * 9 / 16); }
+  #box iframe { width: 100%; height: 100%; border: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="box"><div id="yt"></div></div>
+<script>
+'use strict';
+(function () {
+  var player = null, apiReady = false, ready = false, error = 0, live = false;
+  var pending = null, startAt = 0, primed = false, volume = 1;
+
+  function vol(v) {
+    if (!player || !player.setVolume) return;
+    if (v <= 0) player.mute(); else { player.unMute(); player.setVolume(Math.round(v * 100)); }
+  }
+
+  function create(id) {
+    player = new YT.Player('yt', {
+      videoId: id,
+      playerVars: { autoplay: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, modestbranding: 1,
+        playsinline: 1, rel: 0, start: Math.floor(startAt), mute: 1, origin: location.origin },
+      events: {
+        onReady: function () { player.playVideo(); },
+        onStateChange: function (e) {
+          if (e.data === YT.PlayerState.PLAYING && !primed) {
+            primed = true;
+            var d = player.getDuration();
+            live = !!(player.getVideoData && player.getVideoData().isLive) || d === 0;
+            vol(volume);
+            if (live) ready = true; else { player.pauseVideo(); player.seekTo(startAt, true); }
+          } else if (primed && !ready && e.data === YT.PlayerState.PAUSED) {
+            ready = true;
+          }
+        },
+        onError: function (e) { error = e.data || 1; }
+      }
+    });
+  }
+
+  function load(id, sec, v, portrait) {
+    document.getElementById('box').className = portrait ? 'portrait' : '';
+    startAt = Math.max(0, sec); volume = v; ready = false; primed = false; error = 0; live = false;
+    if (!apiReady) { pending = id; return; }
+    if (player && player.loadVideoById) {
+      player.mute();
+      player.loadVideoById({ videoId: id, startSeconds: startAt });
+    } else create(id);
+  }
+
+  window.onYouTubeIframeAPIReady = function () {
+    apiReady = true;
+    if (pending) { var id = pending; pending = null; create(id); }
+  };
+
+  window.sig = {
+    load: load,
+    play: function () { if (player && player.playVideo) player.playVideo(); },
+    pause: function () { if (player && player.pauseVideo) player.pauseVideo(); },
+    seek: function (s) { if (player && player.seekTo) player.seekTo(Math.max(0, s), true); },
+    volume: function (v) { volume = v; vol(v); },
+    stop: function () { ready = false; primed = false; if (player && player.stopVideo) player.stopVideo(); },
+    state: function () {
+      var ok = !!(player && player.getPlayerState);
+      return { r: ready, s: ok ? player.getPlayerState() : -1, t: ok ? (player.getCurrentTime() || 0) : 0, e: error, l: live };
+    }
+  };
+
+  var tag = document.createElement('script');
+  tag.src = 'https://www.youtube.com/iframe_api';
+  tag.onerror = function () { error = 1; };
+  document.head.appendChild(tag);
+})();
+</script>
+</body>
+</html>

@@ -70,6 +70,8 @@ svg.icon { width: 18px; height: 18px; flex: none; }
 .pin-card { width: min(360px, 100%); display: grid; justify-items: center; text-align: center; color: var(--walnut-dark); }
 .pin-lock { width: 46px; height: 46px; display: grid; place-items: center; margin-bottom: 14px; }
 .pin-lock svg { width: 36px; height: 36px; }
+.pin-logo { width: 72px; height: 72px; border-radius: 18px; object-fit: contain; margin-bottom: 14px; }
+.brand-logo { width: 36px; height: 36px; border-radius: 10px; object-fit: contain; }
 .pin-card h1 { font-size: 23px; font-weight: 700; }
 .pin-subtitle { margin: 8px 0 0; font-size: 16px; color: var(--walnut); }
 .pin-dots { display: flex; gap: 13px; align-items: center; min-height: 14px; margin: 27px 0 33px; }
@@ -276,3 +278,7 @@ input[type=file]::file-selector-button { font: inherit; padding: 8px 12px; borde
   .library-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 380px) { .media-settings { grid-template-columns: 1fr; } }
+
+.frame-preview { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; border-radius: 12px; border: 1px solid rgba(127, 127, 127, 0.35); background: #000; }
+.frame-thumb { width: 192px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px; border: 1px solid rgba(127, 127, 127, 0.35); }
+.frame-current { margin-bottom: 12px; }

@@ -1,0 +1,17 @@
+{
+  "name": "لوحة مُشغل درب الشفاء",
+  "short_name": "درب الشفاء",
+  "description": "لوحة إدارة شاشات العرض",
+  "lang": "ar",
+  "dir": "rtl",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f5efe6",
+  "theme_color": "#6b4a2f",
+  "icons": [
+    { "src": "logo.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

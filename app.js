@@ -204,17 +204,35 @@
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
+  const TIMED_KINDS = ['image', 'youtube', 'live'];
+  const KIND_LABELS = { video: 'فيديو', image: 'صورة', youtube: 'يوتيوب', live: 'بث مباشر' };
+
+  // Mirrors MediaEntry.youtubeId on the TV.
+  function youtubeId(url) {
+    let u;
+    try { u = new URL(url); } catch { return null; }
+    const host = u.hostname.toLowerCase().replace(/^www./, '').replace(/^m./, '');
+    const parts = u.pathname.split('/').filter(Boolean);
+    let id = null;
+    if (host === 'youtu.be') id = parts[0];
+    else if (host === 'youtube.com' || host === 'youtube-nocookie.com') {
+      if (parts[0] === 'watch') id = u.searchParams.get('v');
+      else if (['live', 'shorts', 'embed'].includes(parts[0])) id = parts[1];
+    }
+    return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+  }
+
   function mediaEntry(value, fallbackId) {
     // Legacy trial URLs are accepted only at the external data boundary.
     const raw = typeof value === 'string' ? { url: value, kind: 'video' } : value;
     if (!raw || typeof raw !== 'object' || !isMediaUrl(raw.url)) return null;
-    const kind = raw.kind === 'image' ? 'image' : 'video';
+    const kind = TIMED_KINDS.includes(raw.kind) ? raw.kind : 'video';
     return {
       id: str(raw.id) || fallbackId,
       url: raw.url,
       kind,
       name: str(raw.name).slice(0, 240) || fileName(raw.url).slice(0, 240),
-      duration_ms: Math.max(0, num(raw.duration_ms) ?? (kind === 'image' ? 10000 : 0)),
+      duration_ms: Math.max(0, num(raw.duration_ms) ?? (kind === 'video' ? 0 : 10000)),
       fade_in_ms: Math.max(0, num(raw.fade_in_ms) || 0),
       fade_out_ms: Math.max(0, num(raw.fade_out_ms) || 0),
       fit: raw.fit === 'cover' ? 'cover' : 'contain',
@@ -242,12 +260,13 @@
 
   function validEntry(entry) {
     return !!entry && !!str(entry.id) && entry.id.length <= 128 && isMediaUrl(entry.url)
-      && ['video', 'image'].includes(entry.kind) && !!str(entry.name) && entry.name.length <= 255
+      && (entry.kind === 'video' || TIMED_KINDS.includes(entry.kind)) && !!str(entry.name) && entry.name.length <= 255
       && ['contain', 'cover'].includes(entry.fit)
       && ['duration_ms', 'fade_in_ms', 'fade_out_ms'].every((key) => Number.isSafeInteger(entry[key]) && entry[key] >= 0)
       && entry.fade_in_ms <= 5000 && entry.fade_out_ms <= 5000
       && entry.fade_in_ms + entry.fade_out_ms <= entry.duration_ms
-      && (entry.kind !== 'image' || (entry.duration_ms >= 1000 && entry.duration_ms <= 86400000));
+      && (entry.kind === 'video' || (entry.duration_ms >= 1000 && entry.duration_ms <= 86400000))
+      && (entry.kind !== 'youtube' || !!youtubeId(entry.url));
   }
 
   function clock(ms) {
@@ -395,6 +414,7 @@
     library: {},
     deviceEditor: null,
     sync: null,
+    syncRuntime: null,
     githubToken: '',
   };
 
@@ -442,6 +462,7 @@
     listen('config', (v) => {
       state.config = v && typeof v === 'object' ? v : null;
       fillConfigForm(false);
+      renderFrameCurrent();
     });
     listen('app_version', (v) => { state.appVersion = v && typeof v === 'object' ? v : null; });
     listen('media_library', (v) => {
@@ -449,6 +470,7 @@
       renderLibrary();
       if (libraryPickerRefresh) libraryPickerRefresh();
     });
+    listen('sync_runtime', (v) => { state.syncRuntime = v && typeof v === 'object' ? v : null; renderGlobalCommands(); });
     listen('sync', (v) => {
       state.sync = v && typeof v === 'object' && v.enabled === true && num(v.anchor_at) != null ? v : null;
       renderGlobalCommands();
@@ -631,6 +653,12 @@
 
   const syncBase = () => num(state.sync.paused_at) ?? serverNow();
 
+  // TVs move the anchor in /sync_runtime after a full power cut; same rule as SyncRuntime.effective.
+  function effAnchor() {
+    const rt = state.syncRuntime;
+    return rt && num(rt.base) === num(state.sync.anchor_at) && num(rt.anchor_at) != null ? num(rt.anchor_at) : num(state.sync.anchor_at);
+  }
+
   async function setSyncEnabled(enabled) {
     if (enabled) {
       const zero = state.playlist.filter((entry) => !(entry.duration_ms > 0)).length;
@@ -665,15 +693,15 @@
     if (action === 'restart') update = pausedAt != null ? { anchor_at: TS, paused_at: TS } : { anchor_at: TS };
     else if (action === 'pause') {
       if (pausedAt != null) { toast('الشاشات متوقفة أصلاً.'); return; }
-      update = { paused_at: TS };
+      update = { paused_at: TS, anchor_at: effAnchor() };
     } else if (action === 'play') {
       if (pausedAt == null) { toast('الشاشات شغّالة أصلاً.'); return; }
-      update = { anchor_at: Math.round(num(s.anchor_at) + (serverNow() - pausedAt)), paused_at: null };
+      update = { anchor_at: Math.round(effAnchor() + (serverNow() - pausedAt)), paused_at: null };
     } else {
       const timeline = globalTimeline();
       if (!timeline) { toast('القائمة العامة ما بيها عناصر بمدة معروفة.', 'bad'); return; }
       const base = syncBase();
-      const pos = timeline.positionAt(base - num(s.anchor_at));
+      const pos = timeline.positionAt(base - effAnchor());
       update = { anchor_at: Math.round(base - timeline.slotStart(pos.slot + (action === 'next' ? 1 : -1))) };
     }
     try {
@@ -692,6 +720,7 @@
     synced: ['متزامنة', 'ok'],
     correcting: ['تصحح تأخير', 'warn'],
     paused: ['متوقفة ويا البقية', 'muted'],
+    live_edge: ['بث مباشر بدون توقيت مشترك (آخر لحظة بالبث)', 'warn'],
   };
   const CLOCK_SOURCES = { ntp: 'ساعة إنترنت (NTP)', firebase: 'ساعة Firebase', device: 'ساعة الجهاز (أقل دقة)' };
 
@@ -729,7 +758,7 @@
       syncLive.replaceChildren(el('strong', { text: 'القائمة العامة ما بيها عناصر بمدة معروفة، فما كو شي يتزامن.' }));
       return;
     }
-    const pos = timeline.positionAt(syncBase() - num(s.anchor_at));
+    const pos = timeline.positionAt(syncBase() - effAnchor());
     const entry = state.playlist[pos.index];
     const zero = state.playlist.length - state.playlist.filter((item) => item.duration_ms > 0).length;
     syncLive.replaceChildren(
@@ -859,12 +888,12 @@
       const age = sampledAt == null ? null : Math.max(0, serverNow() - sampledAt);
       const reportInterval = Math.max(1000, num(d.report_interval_ms) || 1000);
       const stale = age == null || age > Math.max(5000, reportInterval * 3) || !v.online;
-      const measured = position == null ? 'القياس المباشر غير متوفر — حدّث التطبيق إلى الإصدار 2 أو أحدث'
+      const measured = position == null ? 'القياس المباشر غير متوفر — حدّث التطبيق إلى الإصدار 1.4.0 أو أحدث'
         : `${clock(position)} / ${total != null && total > 0 ? clock(total) : '—'} (قياس من الشاشة)`;
       const freshness = age == null ? 'آخر قياس غير متوفر'
         : `آخر قياس قبل ${Math.floor(age / 1000)} ثانية${stale ? ' — قياس قديم' : ''}`;
       const progress = total != null && total > 0 && position != null ? Math.max(0, Math.min(100, position / total * 100)) : 0;
-      const kind = d.media_kind === 'image' ? 'صورة' : d.media_kind === 'video' ? 'فيديو' : 'وسائط';
+      const kind = KIND_LABELS[d.media_kind] || 'وسائط';
       body.append(el('div', { class: `now-playing${stale ? ' stale' : ''}` },
         el('small', { text: `${kind} · ${stateLabel}${size ? ` (${index + 1} من ${size})` : ''}` }),
         el('strong', { title: nowPlaying, text: str(d.media_name) || fileName(nowPlaying) || 'المحتوى الحالي' }),
@@ -1214,6 +1243,35 @@
     throw new Error('pages-timeout');
   }
 
+  // Uploads a new (never overwritten) file to the Pages repo and resolves once its public URL answers.
+  async function githubPublish(path, blob, report) {
+    if (!state.githubToken) throw new Error('github-token-missing');
+    report('جاري تجهيز الملف…');
+    const content = await readBase64(blob, {});
+    report('بالانتظار حتى يخلص الرفع اللي قبله…');
+    await githubSerial(async () => {
+      requireManager();
+      if (await existingSha(path)) return;
+      const body = new Blob([`{"message":${JSON.stringify(`Add ${path}`)},"branch":"main","content":"`, content, '"}'],
+        { type: 'application/json' });
+      await githubRequest('PUT', contentsPath(path), body, {
+        onProgress: (ratio) => report(`جاري الرفع إلى GitHub… ${Math.min(99, Math.floor(ratio * 100))}%`),
+      });
+    });
+    const url = `${PAGES_BASE}${path}`;
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+      requireManager();
+      try {
+        const response = await fetch(`${url}?v=${Date.now()}`, { method: 'HEAD', cache: 'no-store' });
+        if (response.ok) return url;
+      } catch { /* Pages may still be building; keep polling. */ }
+      report('الملف انرفع. GitHub يجهّز الرابط (عادةً دقيقة)…');
+      await new Promise((resolve) => setTimeout(resolve, 8000));
+    }
+    throw new Error('pages-timeout');
+  }
+
   async function deleteAsset(asset) {
     const inUse = [state.playlist, ...Object.values(state.devicePlaylists).map(toMediaList)]
       .some((list) => list.some((entry) => entry.url === asset.url));
@@ -1347,6 +1405,98 @@
     dialog.showModal();
   }
 
+  let youtubeApi = null;
+  function loadYoutubeApi() {
+    if (window.YT && window.YT.Player) return Promise.resolve(window.YT);
+    if (!youtubeApi) {
+      youtubeApi = new Promise((resolve, reject) => {
+        const previous = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = () => { if (previous) previous(); resolve(window.YT); };
+        const tag = document.createElement('script');
+        tag.src = 'https://www.youtube.com/iframe_api';
+        tag.onerror = () => { youtubeApi = null; reject(new Error('network')); };
+        document.head.append(tag);
+      });
+    }
+    return youtubeApi;
+  }
+
+  // Resolves to the video length in ms, 0 for a live broadcast, or null when YouTube can't tell.
+  async function youtubeDuration(id) {
+    const YT = await loadYoutubeApi().catch(() => null);
+    if (!YT) return null;
+    const host = el('div', { style: 'position:fixed;left:-9999px;top:0;width:320px;height:180px' }, el('div'));
+    document.body.append(host);
+    return new Promise((resolve) => {
+      let player = null;
+      const done = (value) => {
+        clearTimeout(timer);
+        try { if (player) player.destroy(); } catch { /* already gone */ }
+        host.remove();
+        resolve(value);
+      };
+      const timer = setTimeout(() => done(null), 15000);
+      player = new YT.Player(host.firstChild, {
+        videoId: id,
+        playerVars: { mute: 1, controls: 0 },
+        events: {
+          onReady: () => {
+            const live = player.getVideoData && player.getVideoData().isLive;
+            const seconds = player.getDuration();
+            done(live ? 0 : seconds > 0 ? Math.round(seconds * 1000) : null);
+          },
+          onError: () => done(null),
+        },
+      });
+    });
+  }
+
+  function addStreamLink(editor) {
+    const url = el('input', { type: 'url', dir: 'ltr', placeholder: 'https://www.youtube.com/watch?v=… أو https://…/index.m3u8', 'aria-label': 'الرابط' });
+    const name = el('input', { type: 'text', maxlength: '200', 'aria-label': 'الاسم' });
+    const minutes = el('input', { type: 'number', min: '0.1', step: 'any', dir: 'ltr', value: '120', 'aria-label': 'المدة بالدقائق' });
+    const durationField = el('label', { class: 'field' }, el('span', { text: 'كم دقيقة يبقى معروض (للبث المباشر أو إذا ما انعرفت مدة فيديو اليوتيوب)' }), minutes);
+    const info = el('p', { class: 'muted-text', text: 'يوتيوب: الصق رابط الفيديو أو البث (watch أو youtu.be أو shorts أو live). بث مباشر آخر: لازم يكون رابط البث نفسه ينتهي بـ m3u8 أو mpd، مو رابط صفحة الموقع.' });
+    const error = el('p', { class: 'form-error', hidden: true });
+    const add = button('إضافة للقائمة', { kind: 'primary' });
+    const dialog = el('dialog', { class: 'modal' }, el('div', { class: 'modal-card' },
+      el('div', { class: 'modal-head' }, el('h2', { text: 'رابط يوتيوب أو بث مباشر' }),
+        button('إغلاق', { kind: 'ghost sm', iconName: 'x', iconOnly: true, onClick: () => dialog.close() })),
+      el('div', { class: 'modal-body' }, info,
+        el('label', { class: 'field' }, el('span', { text: 'الرابط' }), url),
+        el('label', { class: 'field' }, el('span', { text: 'الاسم (اختياري)' }), name),
+        durationField, error),
+      el('div', { class: 'modal-foot' }, button('إلغاء', { kind: 'ghost', onClick: () => dialog.close() }), add)));
+    add.addEventListener('click', async () => {
+      const link = url.value.trim();
+      showError(error, '');
+      if (!isMediaUrl(link)) { showError(error, 'الرابط لازم يبدي بـ https://'); return; }
+      const id = youtubeId(link);
+      let durationMs = Math.round(Number(minutes.value) * 60000);
+      if (id) {
+        add.disabled = true;
+        add.textContent = 'جاري قراءة مدة الفيديو…';
+        const detected = await youtubeDuration(id);
+        add.disabled = false;
+        add.textContent = 'إضافة للقائمة';
+        if (detected) durationMs = detected;
+      } else if (/youtube\.com|youtu\.be/i.test(link)) {
+        showError(error, 'رابط يوتيوب هذا ما ينقرأ. افتح الفيديو وانسخ رابطه من زر المشاركة.');
+        return;
+      }
+      if (!(durationMs >= 1000 && durationMs <= 86400000)) { showError(error, 'المدة لازم تكون بين ثانية و24 ساعة.'); return; }
+      editor.addEntry({
+        url: link, kind: id ? 'youtube' : 'live', name: name.value.trim() || (id ? `يوتيوب ${id}` : fileName(link) || 'بث مباشر'),
+        duration_ms: durationMs, fade_in_ms: 0, fade_out_ms: 0, fit: 'contain',
+      });
+      dialog.close();
+    });
+    dialog.addEventListener('close', () => dialog.remove());
+    document.body.append(dialog);
+    dialog.showModal();
+    url.focus();
+  }
+
   function renderUpload(job) {
     if (job.epoch !== sessionEpoch) return;
     job.name.textContent = job.file.name;
@@ -1477,6 +1627,7 @@
 
   function previewMedia(entry) {
     if (!isMediaUrl(entry.url)) { toast('رابط المعاينة غير آمن أو غير صالح.', 'bad'); return; }
+    if (entry.kind === 'youtube' || entry.kind === 'live') { window.open(entry.url, '_blank', 'noopener,noreferrer'); return; }
     const isImage = entry.kind === 'image';
     const media = isImage ? el('img', { src: entry.url, alt: entry.name })
       : el('video', { src: entry.url, controls: true, playsinline: true, preload: 'metadata' });
@@ -1531,12 +1682,15 @@
       this.libraryButton = button('اختيار فيديو أو صورة من المكتبة', {
         kind: 'primary', iconName: 'plus', onClick: () => chooseLibrary(this),
       });
+      this.linkButton = button('إضافة رابط يوتيوب / بث مباشر', {
+        kind: 'ghost', iconName: 'plus', onClick: () => addStreamLink(this),
+      });
       this.addError = el('p', { class: 'form-error', hidden: true });
       this.notice = el('div', { class: 'notice', hidden: true });
       this.list = el('div');
       this.footer = el('div', { class: 'pl-footer' });
       this.root = el('div', { class: 'pl-editor' },
-        el('div', { class: 'pl-add' }, this.libraryButton,
+        el('div', { class: 'pl-add' }, this.libraryButton, this.linkButton,
           el('span', { class: 'muted-text', text: 'ارفع الملفات من تبويب مكتبة الوسائط؛ ما تحتاج روابط.' })),
         this.addError, this.notice, this.list, this.footer);
       this.render();
@@ -1591,20 +1745,22 @@
         el('option', { value: 'cover', text: 'ملء الشاشة / قص' }));
       fit.value = entry.fit;
       fit.addEventListener('change', () => { entry.fit = fit.value; this.changed(true); });
-      const fields = [el('label', { class: 'field' }, el('span', { text: 'طريقة العرض' }), fit)];
-      if (entry.kind === 'image') {
+      const fields = entry.kind === 'youtube' ? [] : [el('label', { class: 'field' }, el('span', { text: 'طريقة العرض' }), fit)];
+      if (entry.kind !== 'video') {
+        const what = KIND_LABELS[entry.kind];
         const unit = el('select', { 'aria-label': 'وحدة مدة الصورة' },
-          el('option', { value: '1000', text: 'ثانية' }), el('option', { value: '60000', text: 'دقيقة' }));
-        const amount = el('input', { type: 'number', min: '0.001', step: 'any', value: entry.duration_ms / 1000, dir: 'ltr', 'aria-label': `مدة ${entry.name}` });
+          el('option', { value: '1000', text: 'ثانية' }), el('option', { value: '60000', text: 'دقيقة' }), el('option', { value: '3600000', text: 'ساعة' }));
+        unit.value = entry.duration_ms % 3600000 === 0 ? '3600000' : entry.duration_ms % 60000 === 0 ? '60000' : '1000';
+        const amount = el('input', { type: 'number', min: '0.001', step: 'any', value: entry.duration_ms / Number(unit.value), dir: 'ltr', 'aria-label': `مدة ${entry.name}` });
         const updateDuration = () => {
           entry.duration_ms = Math.round(Number(amount.value) * Number(unit.value));
-          showError(this.addError, validEntry(entry) ? '' : 'مدة الصورة من ثانية إلى 24 ساعة، ومجموع الدخول والخروج ما يتجاوز المدة.');
+          showError(this.addError, validEntry(entry) ? '' : `مدة ${what} من ثانية إلى 24 ساعة، ومجموع الدخول والخروج ما يتجاوز المدة.`);
           this.changed(true);
         };
         amount.addEventListener('input', updateDuration);
         unit.addEventListener('change', () => { amount.value = String(entry.duration_ms / Number(unit.value)); });
-        fields.push(el('label', { class: 'field' }, el('span', { text: 'مدة الصورة' }), el('div', { class: 'duration-input' }, amount, unit)));
-        for (const [key, label] of [['fade_in_ms', 'تلاشي الدخول (ثانية)'], ['fade_out_ms', 'تلاشي الخروج (ثانية)']]) {
+        fields.push(el('label', { class: 'field' }, el('span', { text: `مدة ${what}` }), el('div', { class: 'duration-input' }, amount, unit)));
+        if (entry.kind === 'image') for (const [key, label] of [['fade_in_ms', 'تلاشي الدخول (ثانية)'], ['fade_out_ms', 'تلاشي الخروج (ثانية)']]) {
           const input = el('input', { type: 'number', min: '0', max: '5', step: '0.1', value: entry[key] / 1000, dir: 'ltr', 'aria-label': `${label} ${entry.name}` });
           input.addEventListener('input', () => {
             entry[key] = Math.round(Number(input.value) * 1000);
@@ -1679,7 +1835,7 @@
                 el('span', { class: 'pl-num', text: String(i + 1) }),
                 el('div', { class: 'pl-info' },
                   el('strong', { title: entry.name, text: entry.name }),
-                  el('small', { text: entry.kind === 'image' ? 'صورة' : `فيديو · ${entry.duration_ms ? clock(entry.duration_ms) : 'المدة من الشاشة'}` })),
+                  el('small', { text: entry.kind === 'image' ? 'صورة' : `${KIND_LABELS[entry.kind]} · ${entry.duration_ms ? clock(entry.duration_ms) : 'المدة من الشاشة'}` })),
                 el('div', { class: 'pl-actions' },
                   button('معاينة', { kind: 'ghost sm', iconName: 'eye', iconOnly: true, onClick: () => previewMedia(entry) }),
                   button('لفوق', { kind: 'ghost sm', iconName: 'up', iconOnly: true, disabled: i === 0, onClick: () => this.move(i, -1) }),
@@ -1844,6 +2000,140 @@
     }
   });
 
+  // ---------- Screen frame (side artwork around portrait videos) ----------
+
+  // A 9:16 video scaled into 1920×1080 spans x = 656…1264; the TV stretches this JPEG over the screen.
+  const FRAME_W = 1920;
+  const FRAME_H = 1080;
+  const FRAME_SIDE = 656;
+  const frame = { left: null, right: null, background: null, color: '#1a120c', fit: 'cover', busy: false };
+  const frameCanvas = el('canvas', { width: String(FRAME_W), height: String(FRAME_H), class: 'frame-preview', 'aria-label': 'معاينة الإطار' });
+  const frameStatus = el('p', { class: 'muted-text', style: 'margin:0' });
+  const frameCurrent = el('div', { class: 'frame-current' });
+
+  function drawFit(ctx, img, x, y, w, h, fit) {
+    const scale = fit === 'cover' ? Math.max(w / img.naturalWidth, h / img.naturalHeight) : Math.min(w / img.naturalWidth, h / img.naturalHeight);
+    const dw = img.naturalWidth * scale;
+    const dh = img.naturalHeight * scale;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+    ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+    ctx.restore();
+  }
+
+  function paintFrame(canvas, withGuide) {
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = frame.color;
+    ctx.fillRect(0, 0, FRAME_W, FRAME_H);
+    if (frame.background) drawFit(ctx, frame.background, 0, 0, FRAME_W, FRAME_H, 'cover');
+    if (frame.left) drawFit(ctx, frame.left, 0, 0, FRAME_SIDE, FRAME_H, frame.fit);
+    if (frame.right) drawFit(ctx, frame.right, FRAME_W - FRAME_SIDE, 0, FRAME_SIDE, FRAME_H, frame.fit);
+    if (!withGuide) return;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(FRAME_SIDE, 0, FRAME_W - 2 * FRAME_SIDE, FRAME_H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.lineWidth = 6;
+    ctx.setLineDash([24, 18]);
+    ctx.strokeRect(FRAME_SIDE + 3, 3, FRAME_W - 2 * FRAME_SIDE - 6, FRAME_H - 6);
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 64px Tajawal, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.direction = 'rtl';
+    ctx.fillText('مكان الفيديو الطولي', FRAME_W / 2, FRAME_H / 2);
+  }
+
+  function loadLocalImage(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('ما كدرت أقرا الصورة. جرّب JPEG أو PNG.')); };
+      img.src = url;
+    });
+  }
+
+  function renderFrameCurrent() {
+    const url = str(state.config?.frame_url);
+    frameCurrent.replaceChildren(url && isHttpsUrl(url)
+      ? el('div', { class: 'group' }, el('img', { src: url, alt: 'الإطار الحالي', class: 'frame-thumb' }),
+        el('span', { class: 'muted-text', text: 'هذا الإطار المعروض حالياً على الشاشات.' }),
+        button('إزالة الإطار', { kind: 'danger sm', iconName: 'trash', onClick: removeFrame }))
+      : el('p', { class: 'muted-text', style: 'margin:0', text: 'ما كو إطار حالياً؛ الفراغ جنب الفيديو الطولي أسود.' }));
+  }
+
+  async function saveFrame() {
+    if (frame.busy) return;
+    if (!frame.left && !frame.right && !frame.background) { frameStatus.textContent = 'اختار صورة وحدة على الأقل.'; return; }
+    frame.busy = true;
+    try {
+      requireManager();
+      const out = el('canvas', { width: String(FRAME_W), height: String(FRAME_H) });
+      paintFrame(out, false);
+      const blob = await new Promise((resolve) => out.toBlob(resolve, 'image/jpeg', 0.9));
+      if (!blob) throw new Error('ما كدرت أجهّز صورة الإطار.');
+      const url = await githubPublish(`frames/${newId()}.jpg`, blob, (message) => { frameStatus.textContent = message; });
+      await managerWrite(() => db.ref('config/frame_url').set(url));
+      frameStatus.textContent = 'انحفظ الإطار. الشاشات تعرضه خلال ثواني.';
+      toast('انحفظ إطار الشاشة.', 'ok');
+    } catch (e) {
+      frameStatus.textContent = errorText(e);
+    } finally {
+      frame.busy = false;
+    }
+  }
+
+  async function removeFrame() {
+    if (!(await confirmBox({ title: 'إزالة الإطار', message: 'الفراغ جنب الفيديوهات الطولية يرجع أسود.', okText: 'إزالة', danger: true }))) return;
+    try {
+      await managerWrite(() => db.ref('config/frame_url').remove());
+      toast('انشال الإطار.', 'ok');
+    } catch (e) {
+      toast(errorText(e), 'bad');
+    }
+  }
+
+  (function buildFrameEditor() {
+    const picker = (label, key) => {
+      const input = el('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp', 'aria-label': label });
+      input.addEventListener('change', async () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        try {
+          frame[key] = await loadLocalImage(file);
+          frameStatus.textContent = '';
+        } catch (e) {
+          frameStatus.textContent = e.message;
+        }
+        paintFrame(frameCanvas, true);
+      });
+      const clear = button('شيل', { kind: 'ghost sm', onClick: () => { frame[key] = null; input.value = ''; paintFrame(frameCanvas, true); } });
+      return el('label', { class: 'field' }, el('span', { text: label }), el('div', { class: 'group' }, input, clear));
+    };
+    const color = el('input', { type: 'color', value: frame.color, 'aria-label': 'لون الخلفية' });
+    color.addEventListener('input', () => { frame.color = color.value; paintFrame(frameCanvas, true); });
+    const fit = el('select', { 'aria-label': 'طريقة وضع الصور الجانبية' },
+      el('option', { value: 'cover', text: 'تعبّي الجانب كله (قص بسيط إذا المقاس مختلف)' }),
+      el('option', { value: 'contain', text: 'الصورة كاملة بدون قص' }));
+    fit.addEventListener('change', () => { frame.fit = fit.value; paintFrame(frameCanvas, true); });
+    $('frame-editor').append(
+      frameCurrent,
+      el('div', { class: 'media-settings' },
+        picker('الصورة اليمنى', 'right'),
+        picker('الصورة اليسرى', 'left')),
+      el('div', { class: 'media-settings' },
+        el('label', { class: 'field' }, el('span', { text: 'لون الخلفية' }), color),
+        el('label', { class: 'field' }, el('span', { text: 'وضع الصور' }), fit),
+        picker('أو صورة خلفية كاملة جاهزة 1920×1080 (اختياري)', 'background')),
+      frameCanvas,
+      frameStatus,
+      el('div', { class: 'form-actions' }, button('حفظ الإطار ونشره على الشاشات', { kind: 'primary', onClick: saveFrame })));
+    paintFrame(frameCanvas, true);
+    renderFrameCurrent();
+  })();
+
   // ---------- Update tab ----------
 
   let updateRenderSignature = '';
@@ -1916,12 +2206,19 @@
     }
   }
 
+  let updateFile = null;
+
   $('upd-file').addEventListener('change', async (event) => {
     const file = event.target.files && event.target.files[0];
     const epoch = sessionEpoch;
     const info = $('upd-file-info');
     event.target.value = '';
     if (!file) return;
+    updateFile = null;
+    if (!/.apk$/i.test(file.name) || file.size > 95 * 1024 * 1024) {
+      info.textContent = 'اختار ملف APK (أصغر من 95 MiB).';
+      return;
+    }
     if (!(window.crypto && crypto.subtle)) {
       info.textContent = 'هذا المتصفح ما يكدر يحسب البصمة. افتح اللوحة بـ Chrome أو Edge.';
       return;
@@ -1931,7 +2228,9 @@
       const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
       if (epoch !== sessionEpoch || !pinUnlocked) return;
       $('upd-sha').value = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
-      info.textContent = `${file.name} · ${formatMb(file.size / (1024 * 1024))} · انحسبت البصمة`;
+      updateFile = file;
+      $('upd-url').value = '';
+      info.textContent = `${file.name} · ${formatMb(file.size / (1024 * 1024))} · جاهز، راح ينرفع على GitHub لما تضغط نشر`;
     } catch (e) {
       if (epoch === sessionEpoch && pinUnlocked) info.textContent = `ما كدرت أقرا الملف: ${e.message || e}`;
     }
@@ -1953,7 +2252,9 @@
     if (Number.isInteger(code) && installed.length && code <= Math.min(...installed)) {
       problems.push(`كل الشاشات عدها الإصدار ${Math.min(...installed)} أو أحدث، فهذا التحديث ما راح ينزل على أي شاشة. ارفع رقم versionCode بالمشروع وصدّر النسخة من جديد.`);
     }
-    if (!isHttpsUrl(url)) problems.push('رابط الملف لازم يكون رابط https كامل.');
+    const upload = url ? null : updateFile;
+    if (!upload && !isHttpsUrl(url)) problems.push('اختار ملف APK من جهازك، أو الصق رابط https كامل للملف.');
+    if (upload && !/^[0-9a-f]{64}$/.test(sha)) problems.push('انتظر لحد ما تنحسب بصمة الملف، أو اختاره مرة ثانية.');
     if (sha && !/^[0-9a-f]{64}$/.test(sha)) problems.push('البصمة لازم تكون 64 حرف (أرقام وحروف a-f). اتركها فاضية أو احسبها من الملف.');
     if (problems.length) {
       showError(errorBox, problems.join('\n'));
@@ -1966,15 +2267,24 @@
       okText: 'انشر',
     });
     if (!ok) return;
-    const payload = { version_code: code, apk_url: url };
-    if (sha) payload.sha256 = sha;
+    const submit = event.target.querySelector('button[type=submit]');
+    const info = $('upd-file-info');
+    submit.disabled = true;
     try {
+      const apkUrl = upload
+        ? await githubPublish(`apk/signage-${code}-${sha.slice(0, 12)}.apk`, upload, (message) => { info.textContent = message; })
+        : url;
+      const payload = { version_code: code, apk_url: apkUrl };
+      if (sha) payload.sha256 = sha;
       await managerWrite(() => db.ref('app_version').set(payload));
       event.target.reset();
-      $('upd-file-info').textContent = '';
-      toast(`انتشر الإصدار ${code}.`, 'ok');
+      updateFile = null;
+      info.textContent = '';
+      toast(`انتشر الإصدار ${code}. الشاشات تنزّله خلال دقائق.`, 'ok');
     } catch (e) {
       showError(errorBox, errorText(e));
+    } finally {
+      submit.disabled = false;
     }
   });
 
@@ -2182,6 +2492,27 @@
   }
 
   document.querySelectorAll('[data-icon]').forEach((node) => node.append(icon(node.dataset.icon)));
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch((error) => console.warn('Service worker registration failed', error));
+  }
+  let installPrompt = null;
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    installPrompt = event;
+    $('install-btn').hidden = false;
+  });
+  window.addEventListener('appinstalled', () => {
+    installPrompt = null;
+    $('install-btn').hidden = true;
+  });
+  $('install-btn').addEventListener('click', async () => {
+    if (!installPrompt) return;
+    const prompt = installPrompt;
+    installPrompt = null;
+    $('install-btn').hidden = true;
+    await prompt.prompt();
+  });
 
   renderPin();
 
