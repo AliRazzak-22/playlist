@@ -1,5 +1,5 @@
-const CACHE = 'signage-admin-v1';
-const SHELL = ['./', 'index.html', 'app.js', 'style.css', 'logo.png', 'manifest.webmanifest'];
+const CACHE = 'signage-admin-v2';
+const SHELL = ['./', 'index.html', 'app.js', 'style.css', 'logo.png', 'icon-192.png', 'icon-512.png', 'manifest.webmanifest'];
 const SHELL_URLS = new Set(SHELL.map((p) => new URL(p, self.registration.scope).href));
 
 self.addEventListener('install', (event) => {

@@ -18,43 +18,52 @@
 'use strict';
 (function () {
   var player = null, apiReady = false, ready = false, error = 0, live = false;
-  var pending = null, startAt = 0, primed = false, volume = 1;
+  var pending = null, startAt = 0, primed = false, volume = 1, quality = '';
 
   function vol(v) {
     if (!player || !player.setVolume) return;
     if (v <= 0) player.mute(); else { player.unMute(); player.setVolume(Math.round(v * 100)); }
   }
 
+  function lockQuality() {
+    if (quality && player && player.setPlaybackQuality) player.setPlaybackQuality(quality);
+  }
+
   function create(id) {
     player = new YT.Player('yt', {
       videoId: id,
       playerVars: { autoplay: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, modestbranding: 1,
-        playsinline: 1, rel: 0, start: Math.floor(startAt), mute: 1, origin: location.origin },
+        playsinline: 1, rel: 0, start: Math.floor(startAt), mute: 1, origin: location.origin, vq: quality || undefined },
       events: {
-        onReady: function () { player.playVideo(); },
+        onReady: function () { lockQuality(); player.playVideo(); },
         onStateChange: function (e) {
           if (e.data === YT.PlayerState.PLAYING && !primed) {
             primed = true;
             var d = player.getDuration();
             live = !!(player.getVideoData && player.getVideoData().isLive) || d === 0;
             vol(volume);
+            lockQuality();
             if (live) ready = true; else { player.pauseVideo(); player.seekTo(startAt, true); }
           } else if (primed && !ready && e.data === YT.PlayerState.PAUSED) {
             ready = true;
+          } else if (e.data === YT.PlayerState.PLAYING) {
+            lockQuality();
           }
         },
+        onPlaybackQualityChange: function () { lockQuality(); },
         onError: function (e) { error = e.data || 1; }
       }
     });
   }
 
-  function load(id, sec, v, portrait) {
+  function load(id, sec, v, portrait, q) {
     document.getElementById('box').className = portrait ? 'portrait' : '';
-    startAt = Math.max(0, sec); volume = v; ready = false; primed = false; error = 0; live = false;
+    startAt = Math.max(0, sec); volume = v; quality = q || ''; ready = false; primed = false; error = 0; live = false;
     if (!apiReady) { pending = id; return; }
     if (player && player.loadVideoById) {
       player.mute();
       player.loadVideoById({ videoId: id, startSeconds: startAt });
+      lockQuality();
     } else create(id);
   }
 

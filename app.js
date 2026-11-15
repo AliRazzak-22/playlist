@@ -13,7 +13,7 @@
   const MAX_URL_LENGTH = 2048;
   const PIN_LENGTH = 9;
   const SESSION_MS = 8 * 60 * 60 * 1000;
-  const DEFAULT_CONFIG = { volume: 1, muted: false, update_check_interval_minutes: 30, playback_order: 'sequential', display_mode: 'contain' };
+  const DEFAULT_CONFIG = { volume: 1, muted: false, update_check_interval_minutes: 30, playback_order: 'sequential', display_mode: 'contain', youtube_quality: 'auto' };
   let pinValue = '';
   let pinBusy = false;
   let pinUnlocked = false;
@@ -415,6 +415,7 @@
     deviceEditor: null,
     sync: null,
     syncRuntime: null,
+    syncHold: null,
     githubToken: '',
   };
 
@@ -471,6 +472,7 @@
       if (libraryPickerRefresh) libraryPickerRefresh();
     });
     listen('sync_runtime', (v) => { state.syncRuntime = v && typeof v === 'object' ? v : null; renderGlobalCommands(); });
+  listen('sync_hold', (v) => { state.syncHold = v && typeof v === 'object' ? v : null; renderSync(); });
     listen('sync', (v) => {
       state.sync = v && typeof v === 'object' && v.enabled === true && num(v.anchor_at) != null ? v : null;
       renderGlobalCommands();
@@ -528,7 +530,7 @@
 
   const TAB_NAMES = ['screens', 'playlist', 'control', 'update', 'library'];
 
-  function selectTab(name) {
+  function selectTab(name, slide = 0) {
     if (!TAB_NAMES.includes(name)) name = 'screens';
     document.querySelectorAll('.tabs [data-tab]').forEach((btn) => {
       const active = btn.dataset.tab === name;
@@ -536,7 +538,9 @@
       btn.setAttribute('aria-selected', String(active));
     });
     document.querySelectorAll('.tab-panel').forEach((panel) => {
-      panel.classList.toggle('active', panel.id === `tab-${name}`);
+      const active = panel.id === `tab-${name}`;
+      if (active) panel.style.setProperty('--tab-slide', `${slide}px`);
+      panel.classList.toggle('active', active);
     });
     if (location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
   }
@@ -544,6 +548,29 @@
   document.querySelectorAll('.tabs [data-tab]').forEach((btn) => {
     btn.addEventListener('click', () => selectTab(btn.dataset.tab));
   });
+
+  // Swipe between tabs. RTL: swipe left = next tab, swipe right = previous.
+  // Passive listeners keep vertical scrolling native; only a fast horizontal fling switches.
+  const mainEl = document.querySelector('main');
+  let swipeStart = null;
+  mainEl.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1 || e.target.closest('.tabs, input, textarea, select, .menu-list')) { swipeStart = null; return; }
+    const t = e.touches[0];
+    swipeStart = { x: t.clientX, y: t.clientY, at: Date.now() };
+  }, { passive: true });
+  mainEl.addEventListener('touchend', (e) => {
+    if (!swipeStart) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - swipeStart.x;
+    const dy = t.clientY - swipeStart.y;
+    const dt = Date.now() - swipeStart.at;
+    swipeStart = null;
+    if (dt > 600 || Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    const current = TAB_NAMES.indexOf(location.hash.slice(1));
+    const next = (current < 0 ? 0 : current) + (dx < 0 ? 1 : -1);
+    if (next < 0 || next >= TAB_NAMES.length) return;
+    selectTab(TAB_NAMES[next], dx < 0 ? -14 : 14);
+  }, { passive: true });
 
   // ---------- Commands ----------
 
@@ -653,6 +680,12 @@
 
   const syncBase = () => num(state.sync.paused_at) ?? serverNow();
 
+  // Frozen milliseconds accumulated by group holds; part of the shared clock, like the anchor.
+  function effDebt() {
+    const rt = state.syncRuntime;
+    return rt && num(rt.base) === num(state.sync.anchor_at) ? (num(rt.paused_ms) || 0) : 0;
+  }
+
   // TVs move the anchor in /sync_runtime after a full power cut; same rule as SyncRuntime.effective.
   function effAnchor() {
     const rt = state.syncRuntime;
@@ -701,7 +734,7 @@
       const timeline = globalTimeline();
       if (!timeline) { toast('القائمة العامة ما بيها عناصر بمدة معروفة.', 'bad'); return; }
       const base = syncBase();
-      const pos = timeline.positionAt(base - effAnchor());
+      const pos = timeline.positionAt(base - effAnchor() - effDebt());
       update = { anchor_at: Math.round(base - timeline.slotStart(pos.slot + (action === 'next' ? 1 : -1))) };
     }
     try {
@@ -721,6 +754,7 @@
     correcting: ['تصحح تأخير', 'warn'],
     paused: ['متوقفة ويا البقية', 'muted'],
     live_edge: ['بث مباشر بدون توقيت مشترك (آخر لحظة بالبث)', 'warn'],
+    holding: ['متوقفة ويا البقية حتى تجهز شاشة', 'warn'],
   };
   const CLOCK_SOURCES = { ntp: 'ساعة إنترنت (NTP)', firebase: 'ساعة Firebase', device: 'ساعة الجهاز (أقل دقة)' };
 
@@ -730,7 +764,7 @@
   function renderSync() {
     const panel = $('sync-panel');
     const s = state.sync;
-    const signature = JSON.stringify([!!s, num(s?.paused_at) != null, state.loaded.has('sync')]);
+    const signature = JSON.stringify([!!s, num(s?.paused_at) != null, state.loaded.has('sync'), state.syncHold?.since ?? 0, state.syncHold?.ready ?? false]);
     if (signature !== syncSignature) {
       syncSignature = signature;
       syncLive = el('div', { class: 'now-playing' });
@@ -753,12 +787,21 @@
       ? `من ${devices.length} شاشة متصلة: ${count(['synced', 'paused'])} متزامنة · ${count(['joining', 'correcting'])} تلتحق أو تصحح${old ? ` · ${old} إصدار قديم ما يدعم التزامن` : ''}`
       : '';
     if (!s) return;
+    const hold = state.syncHold;
+    if (hold && !hold.ready) {
+      const holder = str(state.names[hold.by]).trim() || shortCode(hold.by);
+      const secs = Math.max(0, Math.round((serverNow() - num(hold.since)) / 1000));
+      syncLive.replaceChildren(
+        el('strong', { class: 'form-error', text: 'كل الشاشات متوقفة مؤقتاً حتى تجهز أضعف شاشة، وبعدين يكملن سوا من نفس اللحظة.' }),
+        el('small', { text: `الشاشة اللي مسببة الانتظار: ${holder} · الانتظار صار ${secs} ثانية` }));
+      return;
+    }
     const timeline = globalTimeline();
     if (!timeline) {
       syncLive.replaceChildren(el('strong', { text: 'القائمة العامة ما بيها عناصر بمدة معروفة، فما كو شي يتزامن.' }));
       return;
     }
-    const pos = timeline.positionAt(syncBase() - effAnchor());
+    const pos = timeline.positionAt(syncBase() - effAnchor() - effDebt());
     const entry = state.playlist[pos.index];
     const zero = state.playlist.length - state.playlist.filter((item) => item.duration_ms > 0).length;
     syncLive.replaceChildren(
@@ -1934,6 +1977,7 @@
   const cfgInterval = $('cfg-interval');
   const cfgOrder = $('cfg-order');
   const cfgDisplay = $('cfg-display');
+  const cfgQuality = $('cfg-quality');
   let configDirty = false;
 
   function currentConfig() {
@@ -1946,6 +1990,7 @@
       update_check_interval_minutes: interval == null ? DEFAULT_CONFIG.update_check_interval_minutes : interval,
       playback_order: c.playback_order === 'shuffle' ? 'shuffle' : DEFAULT_CONFIG.playback_order,
       display_mode: c.display_mode === 'cover' ? 'cover' : DEFAULT_CONFIG.display_mode,
+      youtube_quality: ['1080p','720p','480p','360p','240p'].includes(c.youtube_quality) ? c.youtube_quality : 'auto',
     };
   }
 
@@ -1960,6 +2005,7 @@
     cfgInterval.value = String(c.update_check_interval_minutes);
     cfgOrder.value = c.playback_order;
     cfgDisplay.value = c.display_mode;
+    cfgQuality.value = c.youtube_quality;
     $('volume-value').textContent = `${cfgVolume.value}%`;
     configDirty = false;
     $('config-state').textContent = state.config ? '' : 'هاي القيم الافتراضية، ما محفوظة بعد.';
@@ -1989,6 +2035,7 @@
         update_check_interval_minutes: interval,
         playback_order: cfgOrder.value === 'shuffle' ? 'shuffle' : 'sequential',
         display_mode: cfgDisplay.value === 'cover' ? 'cover' : 'contain',
+        youtube_quality: cfgQuality.value === 'auto' ? null : cfgQuality.value,
       }));
       configDirty = false;
       fillConfigForm(true);
