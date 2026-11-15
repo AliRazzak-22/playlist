@@ -282,6 +282,8 @@
       return 'الخدمة السحابية رفضت صلاحية المدير. اقفل اللوحة وادخل بالرمز مرة ثانية؛ إذا استمر الرفض، يحتاج مسؤول المشروع نشر قواعد قاعدة البيانات.';
     }
     if (/session-expired|unauthenticated|auth\/user-token-expired/i.test(code)) return 'انتهت الجلسة. اقفل اللوحة وادخل بالرمز مرة ثانية.';
+    if (/transport-position-limit/i.test(code)) return 'وصل موضع العرض إلى حد 7 أيام. أعد الفيديو من البداية أو أعد الاتصال بالبث.';
+    if (/transport-changed/i.test(code)) return 'العرض أو توقيته تغيّر من مكان ثاني. ما نفذنا الأمر حتى ما نستبدل العرض الجديد؛ راجع الحالة وحاول مرة ثانية.';
     if (/upload-canceled/i.test(code)) return 'انلغى الرفع. تقدر تعيد المحاولة.';
     if (/github-token-missing/i.test(code)) return 'لازم تحط مفتاح GitHub مرة وحدة أولاً (فوق، بنفس هاي الصفحة) حتى تكدر ترفع.';
     if (/github-401/i.test(code)) return 'مفتاح GitHub غير صالح أو انلغى. سوّي مفتاح جديد وحطه بمكان المفتاح.';
@@ -464,6 +466,7 @@
     listen('override', (v) => {
       state.override = v && typeof v === 'object' ? v : null;
       spotlightPanel.render();
+      renderGlobalCommands();
     });
     listen('config', (v) => {
       state.config = v && typeof v === 'object' ? v : null;
@@ -477,7 +480,7 @@
       if (libraryPickerRefresh) libraryPickerRefresh();
     });
     listen('sync_runtime', (v) => { state.syncRuntime = v && typeof v === 'object' ? v : null; renderGlobalCommands(); });
-  listen('sync_hold', (v) => { state.syncHold = v && typeof v === 'object' ? v : null; renderSync(); });
+    listen('sync_hold', (v) => { state.syncHold = v && typeof v === 'object' ? v : null; renderSync(); renderGlobalCommands(); });
     listen('sync', (v) => {
       state.sync = v && typeof v === 'object' && v.enabled === true && num(v.anchor_at) != null ? v : null;
       renderGlobalCommands();
@@ -810,19 +813,40 @@
 
   const SYNC_ACTIONS = new Set(['play', 'pause', 'next', 'previous', 'restart']);
 
-  function renderGlobalCommands() {
-    const grid = $('global-commands');
-    grid.replaceChildren(...Object.entries(ACTIONS).map(([action, meta]) => {
-      const shared = !!state.sync && SYNC_ACTIONS.has(action);
-      return button(meta.label, {
-        iconName: meta.icon,
-        title: shared ? 'وضع التزامن شغّال: الأمر يحرك الساعة المشتركة، فكل الشاشات تتحرك سوا' : null,
-        onClick: () => (state.sync && SYNC_ACTIONS.has(action) ? syncAction(action) : sendCommand('commands', action, 'كل الشاشات')),
-      });
-    }));
+  function globalPlaybackAction(action) {
+    // Resolve the target at click time, never send a hidden playlist command under a spotlight.
+    if (activeSpotlight(state.override)) {
+      if (action === 'next' || action === 'previous') {
+        toast('العرض الفوري شغّال. أوقفه حتى ترجع للقائمة وتختار التالي أو السابق.');
+        return;
+      }
+      return spotlightPanel.transport(action);
+    }
+    return state.sync ? syncAction(action) : sendCommand('commands', action, 'كل الشاشات');
   }
 
-  // ---------- Shared frame sync ----------
+  function renderGlobalCommands() {
+    const grid = $('global-commands');
+    const o = activeSpotlight(state.override);
+    grid.replaceChildren(...Object.entries(ACTIONS).map(([action, meta]) => {
+      const transport = SYNC_ACTIONS.has(action);
+      const shared = !!state.sync && transport;
+      const label = o && transport ? ({ play: 'استئناف العرض الفوري', pause: 'إيقاف العرض الفوري مؤقتاً',
+        restart: o.kind === 'live' ? 'ارجع للبث الحي / أعد الاتصال' : 'إعادة يوتيوب من البداية' }[action] || meta.label) : meta.label;
+      return button(label, {
+        iconName: meta.icon,
+        disabled: transport && (!state.loaded.has('override') || (o ? spotlightPanel.saving || ['next', 'previous'].includes(action)
+          : syncSaving || (!!state.sync && !['sync', 'sync_runtime', 'sync_hold'].every((path) => state.loaded.has(path))))),
+        title: o && transport ? 'يتحكم بالعرض الفوري، مو بالقائمة المخفية'
+          : shared ? 'الأمر يضبط الساعة المشتركة لكل الشاشات' : null,
+        onClick: () => transport ? globalPlaybackAction(action) : sendCommand('commands', action, 'كل الشاشات'),
+      });
+    }));
+    if (o) grid.append(button('إعادة مزامنة العرض الفوري', { iconName: 'reload', disabled: spotlightPanel.saving,
+      onClick: () => spotlightPanel.transport('resync') }));
+  }
+
+  // ---------- Scheduled shared playback ----------
 
   // Must stay identical to app/src/main/java/com/signage/tv/player/SyncTimeline.kt.
   function mulberry32(seed) {
@@ -873,6 +897,96 @@
     return { total, empty: n === 0, slotStart, positionAt };
   }
 
+  // Pure transport math; exercised directly by the JS contract tests.
+  const MAX_TRANSPORT_POSITION_MS = 7 * 24 * 60 * 60 * 1000;
+
+  function activeSpotlight(o) {
+    return o && (o.kind === 'youtube' || o.kind === 'live') && str(o.url)
+      && num(o.started_at) != null && o.ended_at !== o.started_at ? o : null;
+  }
+
+  function sameTransport(a, b) {
+    if (a == null || b == null) return a == null && b == null;
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
+  }
+
+  function spotlightPosition(o, now) {
+    return (num(o.position_ms) || 0) + Math.max(0, Math.min(now, num(o.paused_at) ?? now) - o.started_at);
+  }
+
+  function spotlightTransport(o, action, now) {
+    if (action === 'stop') return null;
+    const next = { ...o };
+    if (action === 'pause') {
+      next.paused_at = Math.max(o.started_at, Math.round(now + 2000));
+      delete next.ended_at;
+      return next;
+    }
+    // Resume honors the scheduled pause point, even when that pause is still pending.
+    // Resync uses the current point, bounded by a pause that has already taken effect.
+    const position = action === 'restart' ? 0
+      : spotlightPosition(o, action === 'play' ? (num(o.paused_at) ?? now) : now);
+    if (!Number.isSafeInteger(Math.round(position)) || position > MAX_TRANSPORT_POSITION_MS) {
+      throw new Error('transport-position-limit');
+    }
+    next.position_ms = Math.max(0, Math.round(position));
+    next.started_at = Math.round(now + 5000);
+    delete next.paused_at;
+    delete next.ended_at;
+    return next;
+  }
+
+  function syncClock(s, runtime) {
+    const rt = runtime && num(runtime.base) === num(s.anchor_at) ? runtime : null;
+    return {
+      anchor: num(rt?.anchor_at) ?? s.anchor_at,
+      debt: num(rt?.paused_ms) || 0,
+      resume: Math.max(num(rt?.resume_at) || 0, num(s.resume_at) || 0) || null,
+      applied: num(rt?.hold_applied) || 0,
+    };
+  }
+
+  function boundedSyncTime(now, resumeAt, pausedAt) {
+    return Math.max(resumeAt ?? 0, Math.min(now, pausedAt ?? now));
+  }
+
+  function syncPosition(s, runtime, hold, now) {
+    const c = syncClock(s, runtime);
+    const heldAt = hold && num(hold.since) != null && c.applied < hold.since && now - hold.at <= 30000 ? hold.since : null;
+    const base = boundedSyncTime(Math.min(now, heldAt ?? now), c.resume, num(s.paused_at));
+    return base - c.anchor - c.debt;
+  }
+
+  function playlistTransport(s, runtime, hold, action, now, timeline) {
+    const c = syncClock(s, runtime);
+    const next = { ...s };
+    const resumeAt = Math.round(now + 3000);
+    if (action === 'pause') {
+      next.paused_at = Math.round(now + 2000);
+      // Runtime is removed atomically below: bake its debt into the replacement anchor.
+      next.anchor_at = Math.round(c.anchor + c.debt);
+      if (c.resume != null) next.resume_at = c.resume;
+      if (hold && c.applied < hold.since && now - hold.at <= 30000) {
+        // Keep the held point stationary during the pause lead-in, rather than rewinding it.
+        next.resume_at = Math.max(c.resume ?? 0, next.paused_at);
+        next.anchor_at = Math.round(next.resume_at - syncPosition(s, runtime, hold, now));
+      }
+    } else {
+      let position = 0;
+      if (action === 'play') position = syncPosition(s, runtime, hold, num(s.paused_at) ?? now);
+      else if (action === 'next' || action === 'previous') {
+        const pos = timeline.positionAt(syncPosition(s, runtime, hold, now));
+        position = timeline.slotStart(pos.slot + (action === 'next' ? 1 : -1));
+      }
+      next.anchor_at = Math.round(resumeAt - position);
+      next.resume_at = resumeAt;
+      delete next.paused_at;
+    }
+    return next;
+  }
+  // End pure transport math.
+
   function globalTimeline() {
     if (!state.sync) return null;
     const timeline = syncTimeline(state.playlist.map((entry) => entry.duration_ms),
@@ -880,70 +994,64 @@
     return timeline.empty ? null : timeline;
   }
 
-  const syncBase = () => num(state.sync.paused_at) ?? serverNow();
-
-  // Frozen milliseconds accumulated by group holds; part of the shared clock, like the anchor.
-  function effDebt() {
-    const rt = state.syncRuntime;
-    return rt && num(rt.base) === num(state.sync.anchor_at) ? (num(rt.paused_ms) || 0) : 0;
-  }
-
-  // TVs move the anchor in /sync_runtime after a full power cut; same rule as SyncRuntime.effective.
-  function effAnchor() {
-    const rt = state.syncRuntime;
-    return rt && num(rt.base) === num(state.sync.anchor_at) && num(rt.anchor_at) != null ? num(rt.anchor_at) : num(state.sync.anchor_at);
-  }
+  let syncSaving = false;
 
   async function setSyncEnabled(enabled) {
-    if (enabled) {
-      const zero = state.playlist.filter((entry) => !(entry.duration_ms > 0)).length;
-      const ok = await confirmBox({
-        title: 'تشغيل التزامن',
-        message: `كل الشاشات راح تبدي من أول القائمة بنفس اللحظة، وأي شاشة تنفتح بعدين تلتحق بنفس الفريم.${zero ? `\n\nانتباه: ${zero} عنصر بالقائمة العامة بدون مدة معروفة (روابط قديمة)، وهاي ما تنعرض بوضع التزامن. ارفعها من المكتبة حتى تنحسب مدتها.` : ''}\n\nالشاشات لازم تكون على إصدار التطبيق 3 أو أحدث.`,
-        okText: 'شغّل التزامن',
-      });
-      if (!ok) return;
-    } else if (!(await confirmBox({
-      title: 'إطفاء التزامن',
-      message: 'كل شاشة ترجع تشتغل لوحدها، وممكن تتباعد عن بعض.',
-      okText: 'اطفِ التزامن',
-      danger: true,
-    }))) return;
+    if (syncSaving || !pinUnlocked) return;
+    const epoch = sessionEpoch;
+    syncSaving = true;
+    renderGlobalCommands();
+    renderSync();
     try {
-      await managerWrite(() => (enabled
-        ? db.ref('sync').set({ enabled: true, anchor_at: firebase.database.ServerValue.TIMESTAMP, seed: crypto.getRandomValues(new Int32Array(1))[0] })
-        : db.ref('sync').remove()));
-      toast(enabled ? 'انشغل التزامن. الشاشات تلتحق خلال ثواني.' : 'انطفى التزامن.', 'ok');
+      const zero = state.playlist.filter((entry) => !(entry.duration_ms > 0)).length;
+      const ok = await confirmBox(enabled ? {
+        title: 'تشغيل التزامن',
+        message: `كل الشاشات راح تستعد وتبدي بعد 3 ثواني على ساعة مشتركة، والشاشة المتأخرة تلتحق بنفس موضع التشغيل. هذا مو ضمان تطابق الفريم الفعلي.${zero ? `\n\nانتباه: ${zero} عنصر بالقائمة العامة بدون مدة معروفة ما ينعرض بوضع التزامن.` : ''}\n\nحدّث تطبيق كل الشاشات حتى تدعم أوامر التوقيت الجديدة.`,
+        okText: 'شغّل التزامن',
+      } : {
+        title: 'إطفاء التزامن', message: 'كل شاشة ترجع تشتغل لوحدها، وممكن تتباعد عن بعض.',
+        okText: 'اطفِ التزامن', danger: true,
+      });
+      if (!ok || epoch !== sessionEpoch || !pinUnlocked) return;
+      const resumeAt = Math.round(serverNow() + 3000);
+      await managerWrite(() => db.ref().update({
+        sync: enabled ? { enabled: true, anchor_at: resumeAt, resume_at: resumeAt, seed: crypto.getRandomValues(new Int32Array(1))[0] } : null,
+        sync_runtime: null, sync_hold: null,
+      }));
+      if (epoch === sessionEpoch) toast(enabled ? 'انشغل التزامن. البداية مجدولة بعد 3 ثواني.' : 'انطفى التزامن.', 'ok');
     } catch (e) {
-      toast(errorText(e), 'bad');
+      if (epoch === sessionEpoch) toast(errorText(e), 'bad');
+    } finally {
+      if (epoch === sessionEpoch) { syncSaving = false; renderGlobalCommands(); renderSync(); }
     }
   }
 
   async function syncAction(action) {
+    if (activeSpotlight(state.override)) return globalPlaybackAction(action);
     const s = state.sync;
-    if (!s) return;
-    const TS = firebase.database.ServerValue.TIMESTAMP;
-    const pausedAt = num(s.paused_at);
-    let update;
-    if (action === 'restart') update = pausedAt != null ? { anchor_at: TS, paused_at: TS } : { anchor_at: TS };
-    else if (action === 'pause') {
-      if (pausedAt != null) { toast('الشاشات متوقفة أصلاً.'); return; }
-      update = { paused_at: TS, anchor_at: effAnchor() };
-    } else if (action === 'play') {
-      if (pausedAt == null) { toast('الشاشات شغّالة أصلاً.'); return; }
-      update = { anchor_at: Math.round(effAnchor() + (serverNow() - pausedAt)), paused_at: null };
-    } else {
-      const timeline = globalTimeline();
-      if (!timeline) { toast('القائمة العامة ما بيها عناصر بمدة معروفة.', 'bad'); return; }
-      const base = syncBase();
-      const pos = timeline.positionAt(base - effAnchor() - effDebt());
-      update = { anchor_at: Math.round(base - timeline.slotStart(pos.slot + (action === 'next' ? 1 : -1))) };
+    if (!s || syncSaving || !pinUnlocked) return;
+    if (!['sync', 'sync_runtime', 'sync_hold'].every((path) => state.loaded.has(path))) {
+      toast('ننتظر تحميل الساعة المشتركة وحالة الانتظار قبل تنفيذ الأمر.');
+      return;
     }
+    const pausedAt = num(s.paused_at);
+    if (action === 'pause' && pausedAt != null) { toast('الإيقاف المؤقت مضبوط أصلاً.'); return; }
+    if (action === 'play' && pausedAt == null) { toast('الشاشات شغّالة أصلاً.'); return; }
+    const timeline = globalTimeline();
+    if (['next', 'previous'].includes(action) && !timeline) { toast('القائمة العامة ما بيها عناصر بمدة معروفة.', 'bad'); return; }
+    const epoch = sessionEpoch;
+    syncSaving = true;
+    renderGlobalCommands();
+    renderSync();
     try {
-      await managerWrite(() => db.ref('sync').update(update));
-      toast(`انرسل «${ACTIONS[action].label}» لكل الشاشات المتزامنة.`, 'ok');
+      const next = playlistTransport(s, state.syncRuntime, state.syncHold, action, serverNow(), timeline);
+      // One commit clears the old hold and debt; no stale runtime base can be counted twice.
+      await managerWrite(() => db.ref().update({ sync: next, sync_runtime: null, sync_hold: null }));
+      if (epoch === sessionEpoch) toast(`تجدول «${ACTIONS[action].label}» لكل الشاشات المتزامنة.`, 'ok');
     } catch (e) {
-      toast(errorText(e), 'bad');
+      if (epoch === sessionEpoch) toast(errorText(e), 'bad');
+    } finally {
+      if (epoch === sessionEpoch) { syncSaving = false; renderGlobalCommands(); renderSync(); }
     }
   }
 
@@ -960,25 +1068,49 @@
   };
   const CLOCK_SOURCES = { ntp: 'ساعة إنترنت (NTP)', firebase: 'ساعة Firebase', device: 'ساعة الجهاز (أقل دقة)' };
 
+  function transportTiming(start, pause, now) {
+    if (pause != null && now >= pause) return 'متوقف مؤقتاً';
+    const starting = start != null && now < start ? `البداية خلال ${Math.ceil((start - now) / 1000)} ثواني` : 'قيد التشغيل';
+    return pause != null ? `${starting} · إيقاف خلال ${Math.ceil((pause - now) / 1000)} ثواني` : starting;
+  }
+
+  function measuredDriftSummary(override = null) {
+    const now = serverNow();
+    const reports = allDevices().filter((v) => {
+      const d = v.d;
+      const sampled = num(d.sampled_at);
+      return v.online && num(d.sync_drift_ms) != null && sampled != null && sampled <= now
+        && now - sampled <= Math.max(5000, (num(d.report_interval_ms) || 1000) * 3)
+        && ['synced', 'correcting', 'paused'].includes(d.sync_state)
+        && (!override || (d.now_playing === override.url && sampled >= override.started_at));
+    });
+    return reports.length
+      ? `فرق المشغّل المقاس (تقديري): أكبر فرق عن الساعة المشتركة ${Math.round(Math.max(...reports.map((v) => Math.abs(v.d.sync_drift_ms))))} ms · ${reports.length} شاشة بقياس حديث. مو قياس لتطابق الفريم الفعلي.`
+      : 'فرق المشغّل المقاس: ننتظر قياسات حديثة من الشاشات؛ ما نكدر نأكد تطابق الفريم الفعلي.';
+  }
+
   let syncSignature = '';
   let syncLive = null;
 
   function renderSync() {
     const panel = $('sync-panel');
     const s = state.sync;
-    const signature = JSON.stringify([!!s, num(s?.paused_at) != null, state.loaded.has('sync'), state.syncHold?.since ?? 0, state.syncHold?.ready ?? false]);
+    const o = activeSpotlight(state.override);
+    const signature = JSON.stringify([!!s, num(s?.paused_at) != null, state.loaded.has('sync'), syncSaving, !!o]);
     if (signature !== syncSignature) {
       syncSignature = signature;
       syncLive = el('div', { class: 'now-playing' });
       const summary = el('div', { class: 'muted-text' });
       panel.replaceChildren(
         el('div', { class: 'form-actions', style: 'justify-content:flex-start' },
-          s ? pill(num(s.paused_at) != null ? 'التزامن شغّال — متوقف' : 'التزامن شغّال', num(s.paused_at) != null ? 'warn' : 'ok')
+          s ? pill('الساعة المشتركة شغّالة', 'ok')
             : pill(state.loaded.has('sync') ? 'التزامن طافي' : 'جاري التحميل…', 'muted'),
-          button(s ? 'اطفِ التزامن' : 'شغّل التزامن', { kind: s ? 'danger sm' : 'primary', onClick: () => setSyncEnabled(!s) })),
+          button(s ? 'اطفِ التزامن' : 'شغّل التزامن', { kind: s ? 'danger sm' : 'primary', disabled: syncSaving || !state.loaded.has('sync'), onClick: () => setSyncEnabled(!s) })),
         s ? syncLive : el('p', { class: 'muted-text', style: 'margin:0', text: 'لما التزامن طافي، كل شاشة تشتغل لوحدها.' }),
         summary,
-        el('p', { class: 'muted-text', style: 'margin:0', text: 'بوضع التزامن، أزرار التشغيل والإيقاف والتالي والسابق والإعادة تحت تتحكم بكل الشاشات سوا. الشاشات اللي عدها قائمة خاصة تتزامن ويا الشاشات اللي عدها نفس القائمة.' }));
+        el('p', { class: 'muted-text', style: 'margin:0', text: o
+          ? 'العرض الفوري شغّال فوق القائمة. أزرار التشغيل والإيقاف والإعادة تحت تتحكم بالعرض الفوري، مو بالقائمة المخفية.'
+          : 'بوضع التزامن، الأوامر تتحكم بالساعة المشتركة لكل الشاشات. الشاشات اللي عدها نفس القائمة تتبع نفس التوقيت، لكن اختلاف الأجهزة والشبكة ممكن يسبب فرق بالعرض.' }));
       syncLive.summary = summary;
     }
     if (!syncLive) return;
@@ -986,11 +1118,16 @@
     const count = (states) => devices.filter((v) => states.includes(str(v.d.sync_state))).length;
     const old = devices.filter((v) => (deviceVersion(v.d) ?? 0) < 3).length;
     syncLive.summary.textContent = s
-      ? `من ${devices.length} شاشة متصلة: ${count(['synced', 'paused'])} متزامنة · ${count(['joining', 'correcting'])} تلتحق أو تصحح${old ? ` · ${old} إصدار قديم ما يدعم التزامن` : ''}`
+      ? `من ${devices.length} شاشة متصلة: ${count(['synced', 'paused'])} تتبع التوقيت · ${count(['joining', 'correcting'])} تلتحق أو تصحح${old ? ` · ${old} إصدار قديم ما يدعم التزامن` : ''} · ${measuredDriftSummary(o)}`
       : '';
     if (!s) return;
+    if (o) {
+      syncLive.replaceChildren(el('strong', { text: str(o.name) || o.url }),
+        el('span', { text: `العرض الفوري: ${transportTiming(o.started_at, num(o.paused_at), serverNow())}` }));
+      return;
+    }
     const hold = state.syncHold;
-    if (hold && !hold.ready) {
+    if (hold && syncClock(s, state.syncRuntime).applied !== hold.since) {
       const holder = str(state.names[hold.by]).trim() || shortCode(hold.by);
       const secs = Math.max(0, Math.round((serverNow() - num(hold.since)) / 1000));
       syncLive.replaceChildren(
@@ -1003,11 +1140,11 @@
       syncLive.replaceChildren(el('strong', { text: 'القائمة العامة ما بيها عناصر بمدة معروفة، فما كو شي يتزامن.' }));
       return;
     }
-    const pos = timeline.positionAt(syncBase() - effAnchor() - effDebt());
+    const pos = timeline.positionAt(syncPosition(s, state.syncRuntime, state.syncHold, serverNow()));
     const entry = state.playlist[pos.index];
     const zero = state.playlist.length - state.playlist.filter((item) => item.duration_ms > 0).length;
     syncLive.replaceChildren(
-      el('small', { text: `اللحظة المشتركة للقائمة العامة · عنصر ${pos.index + 1} من ${state.playlist.length}` }),
+      el('small', { text: `${transportTiming(syncClock(s, state.syncRuntime).resume, num(s.paused_at), serverNow())} · اللحظة المشتركة للقائمة العامة · عنصر ${pos.index + 1} من ${state.playlist.length}` }),
       el('strong', { text: entry ? entry.name : '—' }),
       el('bdi', { class: 'measured-time', dir: 'ltr', text: `${clock(pos.offset)} / ${clock(pos.duration)}` }),
       el('progress', { class: 'playback-progress', max: '100', value: Math.min(100, pos.offset / pos.duration * 100), 'aria-label': 'تقدم العنصر الحالي بالساعة المشتركة' }),
@@ -1118,6 +1255,10 @@
     const startedAt = num(d.started_at);
     const send = (action) => {
       const current = deviceView(v.id);
+      if (activeSpotlight(state.override) && SYNC_ACTIONS.has(action)) {
+        toast('العرض الفوري مشترك: استخدم أزراره بتبويب القائمة أو الأوامر لكل الشاشات حتى تبقى متزامنة.');
+        return undefined;
+      }
       if (state.sync && ['next', 'previous', 'restart'].includes(action) && (deviceVersion(current.d) ?? 0) >= 3) {
         toast('التزامن شغّال: التالي والسابق والإعادة تنطبق على كل الشاشات سوا من تبويب «التحكم والإعدادات».');
         return undefined;
@@ -1163,7 +1304,7 @@
       outdated ? ' ' : null,
       outdated ? pill('ينتظر التحديث', 'warn') : null));
     if (versionCode == null || versionCode < 2) body.append(pill('إصدار قديم: بدون صور أو قياس مباشر', 'warn'));
-    if (state.sync && v.online) {
+    if ((state.sync || activeSpotlight(state.override)) && v.online) {
       const syncState = str(d.sync_state);
       if (versionCode == null || versionCode < 3 || !syncState) {
         body.append(pill('ما تدعم التزامن — حدّث التطبيق إلى الإصدار 3', 'warn'));
@@ -1172,7 +1313,8 @@
         const drift = num(d.sync_drift_ms);
         const corrections = num(d.sync_corrections);
         body.append(kv('التزامن', pill(syncLabel, syncTone),
-          drift != null ? ' · فرق ' : null, drift != null ? ltr(`${Math.round(drift)} ms`) : null,
+          drift != null ? ' · فرق المشغّل المقاس (تقديري) ' : null, drift != null ? ltr(`${Math.round(drift)} ms`) : null,
+          drift != null && (num(d.sampled_at) == null || serverNow() - d.sampled_at > Math.max(5000, (num(d.report_interval_ms) || 1000) * 3)) ? ' — قياس قديم' : null,
           corrections ? ` · ${corrections} تصحيح` : null,
           CLOCK_SOURCES[str(d.clock_source)] ? ` · ${CLOCK_SOURCES[str(d.clock_source)]}` : null));
       }
@@ -2035,12 +2177,20 @@
       this.loop = el('input', { type: 'checkbox' });
       this.loopField = el('label', { class: 'check' }, this.loop, el('span', { text: 'كرر الفيديو تلقائياً (يوتيوب فقط)' }));
       this.error = el('p', { class: 'form-error', hidden: true });
-      this.status = el('div', { class: 'spotlight-status' });
-      this.showButton = button('اعرض الآن على كل الشاشات', { kind: 'primary', iconName: 'play', onClick: () => this.show() });
+      this.status = el('div', { class: 'spotlight-status', role: 'status' });
+      this.timing = el('p', { class: 'muted-text' });
+      this.drift = el('p', { class: 'muted-text' });
+      this.showButton = button('اعرض على كل الشاشات بعد 5 ثواني', { kind: 'primary', iconName: 'play', onClick: () => this.show() });
       this.stopButton = button('أوقف العرض ورجّع القائمة', { kind: 'danger', iconName: 'x', onClick: () => this.stop() });
+      this.pauseButton = button('إيقاف مؤقت', { onClick: () => this.transport(num(this.active()?.paused_at) != null ? 'play' : 'pause') });
+      this.restartButton = button('إعادة يوتيوب من البداية', { onClick: () => this.transport('restart') });
+      this.resyncButton = button('إعادة مزامنة الشاشات', { iconName: 'reload', title: 'يحافظ على الموضع المشترك ويجدول بداية جديدة بعد 5 ثواني', onClick: () => this.transport('resync') });
       this.kind.addEventListener('change', () => this.syncKind());
       this.root = el('div', { class: 'spotlight' },
-        this.status,
+        this.status, this.timing, this.drift,
+        el('div', { class: 'spotlight-transport', role: 'group', 'aria-label': 'تحكم بالعرض الفوري لكل الشاشات' },
+          this.pauseButton, this.restartButton, this.resyncButton, this.stopButton),
+        el('p', { class: 'notice', text: 'تنبيه البث المباشر: فقط البث المباشر ذو الطوابع الزمنية المشتركة يقدر يتزامن. واجهة YouTube Live ما تضمن تطابق الفريم بين الشاشات. الرجوع للبث الحي يعيد الاتصال، مو ضمان تزامن الصورة.' }),
         el('div', { class: 'media-settings' },
           el('label', { class: 'field' }, el('span', { text: 'النوع' }), this.kind),
           el('label', { class: 'field' }, el('span', { text: 'الرابط' }), this.url)),
@@ -2048,7 +2198,7 @@
         this.loopField,
         el('p', { class: 'muted-text', text: 'ماكو مدة عرض: فيديو اليوتيوب يشتغل لحد ما يخلص وحده، والبث المباشر يبقى لحد ما توقفه. العرض ما ينزّل ولا ينخزن ولا يدخل بقائمة التشغيل.' }),
         this.error,
-        el('div', { class: 'form-actions' }, this.stopButton, this.showButton));
+        el('div', { class: 'form-actions' }, this.showButton));
       this.syncKind();
       this.render();
     }
@@ -2058,13 +2208,41 @@
     }
 
     active() {
-      const o = state.override;
-      return o && (o.kind === 'youtube' || o.kind === 'live') && str(o.url) && o.ended !== true ? o : null;
+      return activeSpotlight(state.override);
+    }
+
+    async writeTransport(expected, change, success, confirmation = null) {
+      if (this.saving || !pinUnlocked || !state.loaded.has('override')) return;
+      const epoch = sessionEpoch;
+      this.saving = true;
+      this.root.inert = true;
+      this.render();
+      renderGlobalCommands();
+      try {
+        if (confirmation && !(await confirmBox(confirmation))) return;
+        if (epoch !== sessionEpoch || !pinUnlocked) return;
+        const result = await managerWrite(() => db.ref('override').transaction((current) => {
+          if (epoch !== sessionEpoch || !pinUnlocked || Date.now() >= sessionDeadline || !state.connected
+            || !sameTransport(expected, current)) return undefined;
+          return change(current);
+        }, undefined, false));
+        if (epoch !== sessionEpoch) return;
+        if (!result.committed) throw new Error('transport-changed');
+        toast(success, 'ok');
+      } catch (e) {
+        if (epoch === sessionEpoch) toast(errorText(e), 'bad');
+      } finally {
+        if (epoch === sessionEpoch) {
+          this.saving = false;
+          this.root.inert = false;
+          this.render();
+          renderGlobalCommands();
+        }
+      }
     }
 
     async show() {
-      if (this.saving || !pinUnlocked) return;
-      const epoch = sessionEpoch;
+      if (this.saving || !pinUnlocked || !state.loaded.has('override')) return;
       const kind = this.kind.value;
       const link = this.url.value.trim();
       showError(this.error, '');
@@ -2073,40 +2251,32 @@
         showError(this.error, 'رابط يوتيوب هذا ما ينقرأ. افتح الفيديو وانسخ رابطه من زر المشاركة (watch أو youtu.be أو shorts أو live).');
         return;
       }
-      const name = this.name.value.trim().slice(0, 200)
-        || (kind === 'youtube' ? `يوتيوب ${youtubeId(link)}` : fileName(link) || 'بث مباشر');
-      const payload = { kind, url: link, name, loop: kind === 'youtube' && this.loop.checked, started_at: firebase.database.ServerValue.TIMESTAMP };
-      this.saving = true;
-      this.root.inert = true;
-      this.render();
-      try {
-        await managerWrite(() => db.ref('override').set(payload));
-        if (epoch !== sessionEpoch) return;
-        toast('انعرض فوراً على كل الشاشات.', 'ok');
-      } catch (e) {
-        if (epoch === sessionEpoch) toast(errorText(e), 'bad');
-      } finally {
-        if (epoch === sessionEpoch) { this.saving = false; this.root.inert = false; this.render(); }
-      }
+      const name = (this.name.value.trim()
+        || (kind === 'youtube' ? `يوتيوب ${youtubeId(link)}` : fileName(link) || 'بث مباشر')).slice(0, 200);
+      const payload = { kind, url: link, name, loop: kind === 'youtube' && this.loop.checked,
+        started_at: Math.round(serverNow() + 5000), position_ms: 0 };
+      const expected = state.override ? { ...state.override } : null;
+      return this.writeTransport(expected, () => payload, 'تجدول العرض بعد 5 ثواني حتى تستعد الشاشات.');
     }
 
-    async stop() {
+    async transport(action) {
       if (this.saving || !pinUnlocked) return;
-      const epoch = sessionEpoch;
-      if (!(await confirmBox({ title: 'إيقاف العرض الفوري', message: 'راح ترجع كل الشاشات لقائمة التشغيل فوراً. متأكد؟', okText: 'أوقف ورجّع القائمة' }))) return;
-      if (epoch !== sessionEpoch || !pinUnlocked) return;
-      this.saving = true;
-      this.root.inert = true;
-      this.render();
-      try {
-        await managerWrite(() => db.ref('override').remove());
-        if (epoch !== sessionEpoch) return;
-        toast('انوقف العرض ورجعت الشاشات للقائمة.', 'ok');
-      } catch (e) {
-        if (epoch === sessionEpoch) toast(errorText(e), 'bad');
-      } finally {
-        if (epoch === sessionEpoch) { this.saving = false; this.root.inert = false; this.render(); }
-      }
+      const active = this.active();
+      if (!active) { toast('ماكو عرض فوري فعّال هسه.'); return; }
+      if (action === 'pause' && num(active.paused_at) != null) { toast('الإيقاف المؤقت مضبوط أصلاً.'); return; }
+      if (action === 'play' && num(active.paused_at) == null) { toast('العرض شغّال أو مجدول أصلاً.'); return; }
+      if (!['pause', 'play', 'restart', 'resync', 'stop'].includes(action)) return;
+      const expected = { ...active };
+      const now = serverNow();
+      const labels = { pause: 'تجدول الإيقاف المؤقت لكل الشاشات.', play: 'تجدول الاستئناف بعد 5 ثواني.',
+        restart: active.kind === 'live' ? 'تجدول الرجوع للبث الحي وإعادة الاتصال بعد 5 ثواني.' : 'تجدولت إعادة يوتيوب من البداية بعد 5 ثواني.',
+        resync: 'تجدولت إعادة المزامنة من الموضع المشترك بعد 5 ثواني.', stop: 'انوقف العرض ورجعت الشاشات للقائمة.' };
+      return this.writeTransport(expected, (current) => spotlightTransport(current, action, now), labels[action],
+        action === 'stop' ? { title: 'إيقاف العرض الفوري', message: 'راح ترجع كل الشاشات لقائمة التشغيل فوراً. متأكد؟', okText: 'أوقف ورجّع القائمة' } : null);
+    }
+
+    stop() {
+      return this.transport('stop');
     }
 
     reset() {
@@ -2123,14 +2293,17 @@
 
     render() {
       const o = this.active();
-      this.showButton.disabled = this.saving;
-      this.stopButton.disabled = this.saving || !o;
+      this.showButton.disabled = this.saving || !state.loaded.has('override');
+      for (const control of [this.stopButton, this.pauseButton, this.restartButton, this.resyncButton]) control.disabled = this.saving || !o;
+      this.pauseButton.textContent = num(o?.paused_at) != null ? 'استئناف العرض (بعد 5 ثواني)' : 'إيقاف مؤقت مجدول';
+      this.restartButton.textContent = o?.kind === 'live' ? 'ارجع للبث الحي / أعد الاتصال' : 'إعادة يوتيوب من البداية';
+      this.timing.hidden = this.drift.hidden = !o;
       if (!state.loaded.has('override')) {
         this.status.replaceChildren(pill('جاري التحميل…', 'muted'));
         return;
       }
       if (!o) {
-        const ended = state.override && state.override.ended === true;
+        const ended = state.override && num(state.override.started_at) != null && state.override.ended_at === state.override.started_at;
         this.status.replaceChildren(
           pill(ended ? 'انتهى العرض' : 'ماكو عرض فوري', 'muted'),
           el('span', { class: 'muted-text', text: ended ? 'رجعت الشاشات لقائمة التشغيل. تقدر تعرض شي جديد.' : 'الشاشات تعرض قائمة التشغيل هسه.' }));
@@ -2140,11 +2313,13 @@
       const hint = isYt
         ? (o.loop === true ? 'يتكرر تلقائياً لحد ما توقفه.' : 'يرجع للقائمة من يخلص الفيديو وحده.')
         : 'بث مستمر لحد ما توقفه بيدك.';
-      const started = num(o.started_at) != null ? ` · بدأ ${timeAgo(o.started_at)}` : '';
+      const now = serverNow();
       this.status.replaceChildren(
-        pill(isYt ? 'يوتيوب معروض هسه' : 'بث مباشر معروض هسه', 'ok'),
+        pill(isYt ? 'عرض يوتيوب' : 'بث مباشر', 'ok'),
         el('strong', { text: str(o.name) || o.url }),
-        el('span', { class: 'muted-text', text: hint + started }));
+        el('span', { class: 'muted-text', text: hint }));
+      this.timing.textContent = `${transportTiming(o.started_at, num(o.paused_at), now)} · موضع الساعة المشتركة ${clock(spotlightPosition(o, now))}${o.loop ? ' (زمن تراكمي للتكرار، مو مدة الفيديو)' : ''}`;
+      this.drift.textContent = measuredDriftSummary(o);
     }
   }
 
@@ -2705,6 +2880,8 @@
       library: {},
       deviceEditor: null,
       sync: null,
+      syncRuntime: null,
+      syncHold: null,
       githubToken: '',
     });
     state.loaded.clear();
@@ -2760,6 +2937,7 @@
     globalEditor.saving = false;
     globalEditor.root.inert = false;
     globalEditor.discard();
+    syncSaving = false;
     spotlightPanel.reset();
     updateRenderSignature = '';
     syncSignature = '';

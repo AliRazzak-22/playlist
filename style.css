@@ -203,6 +203,9 @@ main { padding: 18px 24px 48px; max-width: 1400px; margin: 0 auto; }
 /* Playlist editor */
 .pl-editor { display: grid; gap: 12px; }
 .spotlight { display: grid; gap: 12px; }
+.spotlight > p { margin: 0; }
+.spotlight-transport { display: flex; flex-wrap: wrap; gap: 8px; }
+.spotlight-transport .btn { flex: 1 1 180px; }
 .spotlight-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; }
 .spotlight-status strong { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .spotlight-card { border-color: var(--border-strong); }

@@ -19,6 +19,13 @@
 (function () {
   var player = null, apiReady = false, ready = false, error = 0, live = false;
   var pending = null, startAt = 0, primed = false, volume = 1, quality = '';
+  var generation = 0, stateGeneration = null, apiFailed = false;
+
+  function destroyPlayer() {
+    var previous = player;
+    player = null;
+    if (previous && previous.destroy) previous.destroy();
+  }
 
   function vol(v) {
     if (!player || !player.setVolume) return;
@@ -29,47 +36,62 @@
     if (quality && player && player.setPlaybackQuality) player.setPlaybackQuality(quality);
   }
 
-  function create(id) {
-    player = new YT.Player('yt', {
+  function create(id, loadGeneration) {
+    if (loadGeneration !== generation) return;
+    var box = document.getElementById('box');
+    box.textContent = '';
+    var slot = document.createElement('div');
+    slot.id = 'yt';
+    box.appendChild(slot);
+    function current(e) {
+      return loadGeneration === generation && player === instance && e.target === instance;
+    }
+    var instance = new YT.Player('yt', {
       videoId: id,
       playerVars: { autoplay: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, modestbranding: 1,
         playsinline: 1, rel: 0, start: Math.floor(startAt), mute: 1, origin: location.origin, vq: quality || undefined },
       events: {
-        onReady: function () { lockQuality(); player.playVideo(); },
+        onReady: function (e) {
+          if (!current(e) || primed) return;
+          lockQuality(); player.mute(); player.playVideo();
+        },
         onStateChange: function (e) {
+          if (!current(e)) return;
           if (e.data === YT.PlayerState.PLAYING && !primed) {
             primed = true;
             var d = player.getDuration();
             live = !!(player.getVideoData && player.getVideoData().isLive) || d === 0;
-            vol(volume);
             lockQuality();
-            if (live) ready = true; else { player.pauseVideo(); player.seekTo(startAt, true); }
+            player.pauseVideo();
+            if (!live) player.seekTo(startAt, true);
+            vol(volume);
           } else if (primed && !ready && e.data === YT.PlayerState.PAUSED) {
             ready = true;
           } else if (e.data === YT.PlayerState.PLAYING) {
             lockQuality();
           }
         },
-        onPlaybackQualityChange: function () { lockQuality(); },
-        onError: function (e) { error = e.data || 1; }
+        onPlaybackQualityChange: function (e) { if (current(e)) lockQuality(); },
+        onError: function (e) { if (current(e)) error = e.data || 1; }
       }
     });
+    player = instance;
   }
 
-  function load(id, sec, v, portrait, q) {
+  function load(id, sec, v, portrait, q, g) {
+    generation++;
+    stateGeneration = typeof g === 'number' ? g : generation;
+    pending = null;
+    destroyPlayer();
     document.getElementById('box').className = portrait ? 'portrait' : '';
     startAt = Math.max(0, sec); volume = v; quality = q || ''; ready = false; primed = false; error = 0; live = false;
-    if (!apiReady) { pending = id; return; }
-    if (player && player.loadVideoById) {
-      player.mute();
-      player.loadVideoById({ videoId: id, startSeconds: startAt });
-      lockQuality();
-    } else create(id);
+    if (!apiReady) { pending = { id: id, generation: generation }; return; }
+    create(id, generation);
   }
 
   window.onYouTubeIframeAPIReady = function () {
     apiReady = true;
-    if (pending) { var id = pending; pending = null; create(id); }
+    if (pending) { var load = pending; pending = null; create(load.id, load.generation); }
   };
 
   window.sig = {
@@ -78,16 +100,21 @@
     pause: function () { if (player && player.pauseVideo) player.pauseVideo(); },
     seek: function (s) { if (player && player.seekTo) player.seekTo(Math.max(0, s), true); },
     volume: function (v) { volume = v; vol(v); },
-    stop: function () { ready = false; primed = false; if (player && player.stopVideo) player.stopVideo(); },
+    stop: function () {
+      generation++; stateGeneration = null; pending = null;
+      ready = false; primed = false; error = 0; live = false;
+      destroyPlayer();
+    },
     state: function () {
       var ok = !!(player && player.getPlayerState);
-      return { r: ready, s: ok ? player.getPlayerState() : -1, t: ok ? (player.getCurrentTime() || 0) : 0, e: error, l: live };
+      return { g: stateGeneration, r: ready, s: ok ? player.getPlayerState() : -1, t: ok ? (player.getCurrentTime() || 0) : 0,
+        d: ok ? (player.getDuration() || 0) : 0, e: error || (apiFailed && stateGeneration != null ? 1 : 0), l: live };
     }
   };
 
   var tag = document.createElement('script');
   tag.src = 'https://www.youtube.com/iframe_api';
-  tag.onerror = function () { error = 1; };
+  tag.onerror = function () { apiFailed = true; };
   document.head.appendChild(tag);
 })();
 </script>
