@@ -404,6 +404,7 @@
     names: {},
     devicePlaylists: {},
     playlist: [],
+    override: null,
     config: null,
     appVersion: null,
     loaded: new Set(),
@@ -460,6 +461,10 @@
       state.playlist = toMediaList(v);
       globalEditor.setRemote(state.playlist);
     });
+    listen('override', (v) => {
+      state.override = v && typeof v === 'object' ? v : null;
+      spotlightPanel.render();
+    });
     listen('config', (v) => {
       state.config = v && typeof v === 'object' ? v : null;
       fillConfigForm(false);
@@ -498,6 +503,7 @@
       renderDevices();
       renderUpdateTab();
       renderSync();
+      spotlightPanel.render();
     });
   }
 
@@ -526,51 +532,247 @@
       : '');
   }
 
-  // ---------- Tabs ----------
+  // ---------- Tabs: RTL carousel with Royal spring physics ----------
+  // Drag right = next tab (RTL). Panels follow the finger 1:1, rubber-band at
+  // the edges, release into a critically-damped spring; the tab pill glides
+  // with the same position and squashes with velocity.
 
   const TAB_NAMES = ['screens', 'playlist', 'control', 'update', 'library'];
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const rubber = (v) => (1 - 1 / (Math.abs(v) * 0.55 + 1)) * Math.sign(v);
+  const OMEGA = 15;
 
-  function selectTab(name, slide = 0) {
-    if (!TAB_NAMES.includes(name)) name = 'screens';
-    document.querySelectorAll('.tabs [data-tab]').forEach((btn) => {
+  const carousel = {
+    ready: false,
+    viewport: $('tab-viewport'),
+    panels: TAB_NAMES.map((n) => $(`tab-${n}`)),
+    buttons: Array.from(document.querySelectorAll('.tabs [data-tab]')),
+    glider: $('tab-glider'),
+    nav: document.querySelector('.tabs'),
+    W: 0,
+    P: 0,
+    heights: [],
+    spring: null,
+    drag: null,
+    raf: 0,
+    lastFrame: 0,
+    ind: { pos: 0, vel: 0 },
+  };
+
+  const tabIndex = (name) => Math.max(0, TAB_NAMES.indexOf(name));
+
+  function measureCarousel() {
+    carousel.W = carousel.viewport.clientWidth || 1;
+    carousel.heights = carousel.panels.map((p) => p.offsetHeight);
+  }
+
+  function layoutCarousel() {
+    const n = carousel.panels.length;
+    const P = carousel.P;
+    carousel.panels.forEach((p, i) => {
+      const d = i - P;
+      p.style.transform = `translate3d(${(-d * carousel.W).toFixed(2)}px,0,0)`;
+      p.style.visibility = Math.abs(d) <= 1.001 ? 'visible' : 'hidden';
+    });
+    const c = clamp(P, 0, n - 1);
+    const i0 = Math.floor(c);
+    const h0 = carousel.heights[i0] || 0;
+    const h1 = carousel.heights[Math.min(i0 + 1, n - 1)] || h0;
+    carousel.viewport.style.height = `${Math.ceil(h0 + (h1 - h0) * (c - i0))}px`;
+  }
+
+  function placeGlider() {
+    const n = carousel.buttons.length;
+    const c = clamp(carousel.ind.pos, 0, n - 1);
+    const i0 = Math.floor(c);
+    const f = c - i0;
+    const b0 = carousel.buttons[i0];
+    const b1 = carousel.buttons[Math.min(i0 + 1, n - 1)];
+    const left = b0.offsetLeft + (b1.offsetLeft - b0.offsetLeft) * f;
+    const width = b0.offsetWidth + (b1.offsetWidth - b0.offsetWidth) * f;
+    const sq = Math.min(0.24, Math.abs(carousel.ind.vel) * 55);
+    carousel.glider.style.width = `${width.toFixed(1)}px`;
+    carousel.glider.style.height = `${b0.offsetHeight}px`;
+    carousel.glider.style.transform = `translate3d(${left.toFixed(1)}px,${b0.offsetTop}px,0) scale(${(1 + sq).toFixed(3)},${(1 - sq * 0.5).toFixed(3)})`;
+    carousel.glider.style.opacity = '1';
+  }
+
+  function settleTab() {
+    const btn = carousel.buttons[clamp(Math.round(carousel.P), 0, carousel.buttons.length - 1)];
+    btn.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+  }
+
+  function carouselFrame(now) {
+    carousel.raf = 0;
+    const dt = carousel.lastFrame ? Math.min(64, now - carousel.lastFrame) : 16;
+    carousel.lastFrame = now;
+    let active = false;
+    if (carousel.spring) {
+      const sp = carousel.spring;
+      const s = (now - sp.t0) / 1000;
+      const e = Math.exp(-OMEGA * s);
+      const x = sp.target + (sp.A + sp.B * s) * e;
+      const v = e * (sp.B - OMEGA * (sp.A + sp.B * s));
+      carousel.P = x;
+      if ((Math.abs(x - sp.target) < 0.0005 && Math.abs(v) < 0.01) || s > 1.5) {
+        carousel.P = sp.target;
+        carousel.spring = null;
+        settleTab();
+      } else active = true;
+    }
+    const prev = carousel.ind.pos;
+    carousel.ind.pos += (carousel.P - prev) * (1 - Math.exp(-dt / 55));
+    carousel.ind.vel = (carousel.ind.pos - prev) / dt;
+    if (Math.abs(carousel.ind.pos - carousel.P) > 0.001) active = true;
+    else carousel.ind.pos = carousel.P;
+    layoutCarousel();
+    placeGlider();
+    if (active || carousel.drag) carousel.raf = requestAnimationFrame(carouselFrame);
+    else carousel.lastFrame = 0;
+  }
+
+  function kickCarousel() {
+    if (!carousel.raf) carousel.raf = requestAnimationFrame(carouselFrame);
+  }
+
+  function springTo(i, v0 = 0) {
+    i = clamp(i, 0, TAB_NAMES.length - 1);
+    if (reduceMotion.matches) {
+      carousel.spring = null;
+      carousel.P = i;
+      carousel.ind.pos = i;
+      carousel.ind.vel = 0;
+      layoutCarousel();
+      placeGlider();
+      settleTab();
+      return;
+    }
+    const A = carousel.P - i;
+    carousel.spring = { t0: performance.now(), A, B: v0 + OMEGA * A, target: i };
+    kickCarousel();
+  }
+
+  function initCarousel() {
+    if (carousel.ready) { measureCarousel(); layoutCarousel(); placeGlider(); return; }
+    carousel.ready = true;
+    carousel.viewport.classList.add('carousel-ready');
+    carousel.nav.classList.add('glide');
+    measureCarousel();
+    carousel.P = carousel.ind.pos = tabIndex(location.hash.slice(1));
+    layoutCarousel();
+    placeGlider();
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (carousel.ready) placeGlider(); });
+
+    carousel.viewport.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1 || e.target.closest('input, textarea, select, .menu-list, details')) return;
+      carousel.spring = null;
+      const t = e.touches[0];
+      carousel.drag = { id: t.identifier, x0: t.clientX, y0: t.clientY, P0: carousel.P, locked: false, moved: 0, lastT: e.timeStamp, samples: [{ t: e.timeStamp, x: t.clientX }] };
+      kickCarousel();
+    }, { passive: true });
+
+    carousel.viewport.addEventListener('touchmove', (e) => {
+      const d = carousel.drag;
+      if (!d) return;
+      const t = Array.from(e.touches).find((x) => x.identifier === d.id);
+      if (!t) return;
+      const dx = t.clientX - d.x0;
+      const dy = t.clientY - d.y0;
+      if (!d.locked) {
+        if (Math.abs(dx) < 7 && Math.abs(dy) < 7) return;
+        if (Math.abs(dy) > Math.abs(dx)) { carousel.drag = null; return; }
+        d.locked = true;
+      }
+      e.preventDefault();
+      d.moved = Math.max(d.moved, Math.abs(dx));
+      d.lastT = e.timeStamp;
+      const raw = d.P0 + dx / carousel.W;
+      const base = clamp(raw, 0, TAB_NAMES.length - 1);
+      carousel.P = base + rubber(raw - base);
+      d.samples.push({ t: e.timeStamp, x: t.clientX });
+      while (d.samples.length > 2 && e.timeStamp - d.samples[0].t > 100) d.samples.shift();
+      kickCarousel();
+    }, { passive: false });
+
+    const endDrag = (e) => {
+      const d = carousel.drag;
+      if (!d) return;
+      carousel.drag = null;
+      if (d.moved > 8) {
+        const suppress = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
+        carousel.viewport.addEventListener('click', suppress, { capture: true, once: true });
+        setTimeout(() => carousel.viewport.removeEventListener('click', suppress, { capture: true }), 350);
+      }
+      if (!d.locked) { springTo(Math.round(carousel.P)); return; }
+      let v = 0;
+      const t = Array.from(e.changedTouches).find((x) => x.identifier === d.id);
+      if (t && e.timeStamp - d.lastT < 100 && d.samples.length >= 2) {
+        const first = d.samples[0];
+        const dt = e.timeStamp - first.t;
+        if (dt > 0) v = ((t.clientX - first.x) / dt) * 1000 / carousel.W;
+      }
+      const p0 = Math.round(d.P0);
+      const target = clamp(Math.round(carousel.P + v * 0.2), Math.max(0, p0 - 1), Math.min(TAB_NAMES.length - 1, p0 + 1));
+      markTab(target);
+      springTo(target, v);
+    };
+    carousel.viewport.addEventListener('touchend', endDrag);
+    carousel.viewport.addEventListener('touchcancel', () => {
+      if (!carousel.drag) return;
+      carousel.drag = null;
+      const back = clamp(Math.round(carousel.P), 0, TAB_NAMES.length - 1);
+      markTab(back);
+      springTo(back);
+    });
+
+    window.addEventListener('resize', () => {
+      if (!carousel.ready) return;
+      measureCarousel();
+      layoutCarousel();
+      placeGlider();
+    });
+    if (typeof ResizeObserver === 'function') {
+      const ro = new ResizeObserver(() => {
+        if (!carousel.ready) return;
+        carousel.heights = carousel.panels.map((p) => p.offsetHeight);
+        if (!carousel.drag && !carousel.spring) layoutCarousel();
+      });
+      carousel.panels.forEach((p) => ro.observe(p));
+    }
+
+    carousel.nav.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const cur = tabIndex(location.hash.slice(1));
+      const next = clamp(cur + (e.key === 'ArrowLeft' ? 1 : -1), 0, TAB_NAMES.length - 1);
+      if (next === cur) return;
+      e.preventDefault();
+      selectTab(TAB_NAMES[next]);
+      carousel.buttons[next].focus();
+    });
+  }
+
+  function markTab(i) {
+    const name = TAB_NAMES[i];
+    carousel.buttons.forEach((btn) => {
       const active = btn.dataset.tab === name;
       btn.classList.toggle('active', active);
       btn.setAttribute('aria-selected', String(active));
     });
-    document.querySelectorAll('.tab-panel').forEach((panel) => {
-      const active = panel.id === `tab-${name}`;
-      if (active) panel.style.setProperty('--tab-slide', `${slide}px`);
-      panel.classList.toggle('active', active);
-    });
+    carousel.panels.forEach((panel, j) => panel.classList.toggle('active', j === i));
     if (location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
   }
 
-  document.querySelectorAll('.tabs [data-tab]').forEach((btn) => {
+  function selectTab(name) {
+    const i = tabIndex(name);
+    markTab(i);
+    if (!carousel.ready) initCarousel();
+    springTo(i);
+  }
+
+  carousel.buttons.forEach((btn) => {
     btn.addEventListener('click', () => selectTab(btn.dataset.tab));
   });
-
-  // Swipe between tabs. RTL: swipe left = next tab, swipe right = previous.
-  // Passive listeners keep vertical scrolling native; only a fast horizontal fling switches.
-  const mainEl = document.querySelector('main');
-  let swipeStart = null;
-  mainEl.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1 || e.target.closest('.tabs, input, textarea, select, .menu-list')) { swipeStart = null; return; }
-    const t = e.touches[0];
-    swipeStart = { x: t.clientX, y: t.clientY, at: Date.now() };
-  }, { passive: true });
-  mainEl.addEventListener('touchend', (e) => {
-    if (!swipeStart) return;
-    const t = e.changedTouches[0];
-    const dx = t.clientX - swipeStart.x;
-    const dy = t.clientY - swipeStart.y;
-    const dt = Date.now() - swipeStart.at;
-    swipeStart = null;
-    if (dt > 600 || Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
-    const current = TAB_NAMES.indexOf(location.hash.slice(1));
-    const next = (current < 0 ? 0 : current) + (dx < 0 ? 1 : -1);
-    if (next < 0 || next >= TAB_NAMES.length) return;
-    selectTab(TAB_NAMES[next], dx < 0 ? -14 : 14);
-  }, { passive: true });
 
   // ---------- Commands ----------
 
@@ -1448,98 +1650,6 @@
     dialog.showModal();
   }
 
-  let youtubeApi = null;
-  function loadYoutubeApi() {
-    if (window.YT && window.YT.Player) return Promise.resolve(window.YT);
-    if (!youtubeApi) {
-      youtubeApi = new Promise((resolve, reject) => {
-        const previous = window.onYouTubeIframeAPIReady;
-        window.onYouTubeIframeAPIReady = () => { if (previous) previous(); resolve(window.YT); };
-        const tag = document.createElement('script');
-        tag.src = 'https://www.youtube.com/iframe_api';
-        tag.onerror = () => { youtubeApi = null; reject(new Error('network')); };
-        document.head.append(tag);
-      });
-    }
-    return youtubeApi;
-  }
-
-  // Resolves to the video length in ms, 0 for a live broadcast, or null when YouTube can't tell.
-  async function youtubeDuration(id) {
-    const YT = await loadYoutubeApi().catch(() => null);
-    if (!YT) return null;
-    const host = el('div', { style: 'position:fixed;left:-9999px;top:0;width:320px;height:180px' }, el('div'));
-    document.body.append(host);
-    return new Promise((resolve) => {
-      let player = null;
-      const done = (value) => {
-        clearTimeout(timer);
-        try { if (player) player.destroy(); } catch { /* already gone */ }
-        host.remove();
-        resolve(value);
-      };
-      const timer = setTimeout(() => done(null), 15000);
-      player = new YT.Player(host.firstChild, {
-        videoId: id,
-        playerVars: { mute: 1, controls: 0 },
-        events: {
-          onReady: () => {
-            const live = player.getVideoData && player.getVideoData().isLive;
-            const seconds = player.getDuration();
-            done(live ? 0 : seconds > 0 ? Math.round(seconds * 1000) : null);
-          },
-          onError: () => done(null),
-        },
-      });
-    });
-  }
-
-  function addStreamLink(editor) {
-    const url = el('input', { type: 'url', dir: 'ltr', placeholder: 'https://www.youtube.com/watch?v=… أو https://…/index.m3u8', 'aria-label': 'الرابط' });
-    const name = el('input', { type: 'text', maxlength: '200', 'aria-label': 'الاسم' });
-    const minutes = el('input', { type: 'number', min: '0.1', step: 'any', dir: 'ltr', value: '120', 'aria-label': 'المدة بالدقائق' });
-    const durationField = el('label', { class: 'field' }, el('span', { text: 'كم دقيقة يبقى معروض (للبث المباشر أو إذا ما انعرفت مدة فيديو اليوتيوب)' }), minutes);
-    const info = el('p', { class: 'muted-text', text: 'يوتيوب: الصق رابط الفيديو أو البث (watch أو youtu.be أو shorts أو live). بث مباشر آخر: لازم يكون رابط البث نفسه ينتهي بـ m3u8 أو mpd، مو رابط صفحة الموقع.' });
-    const error = el('p', { class: 'form-error', hidden: true });
-    const add = button('إضافة للقائمة', { kind: 'primary' });
-    const dialog = el('dialog', { class: 'modal' }, el('div', { class: 'modal-card' },
-      el('div', { class: 'modal-head' }, el('h2', { text: 'رابط يوتيوب أو بث مباشر' }),
-        button('إغلاق', { kind: 'ghost sm', iconName: 'x', iconOnly: true, onClick: () => dialog.close() })),
-      el('div', { class: 'modal-body' }, info,
-        el('label', { class: 'field' }, el('span', { text: 'الرابط' }), url),
-        el('label', { class: 'field' }, el('span', { text: 'الاسم (اختياري)' }), name),
-        durationField, error),
-      el('div', { class: 'modal-foot' }, button('إلغاء', { kind: 'ghost', onClick: () => dialog.close() }), add)));
-    add.addEventListener('click', async () => {
-      const link = url.value.trim();
-      showError(error, '');
-      if (!isMediaUrl(link)) { showError(error, 'الرابط لازم يبدي بـ https://'); return; }
-      const id = youtubeId(link);
-      let durationMs = Math.round(Number(minutes.value) * 60000);
-      if (id) {
-        add.disabled = true;
-        add.textContent = 'جاري قراءة مدة الفيديو…';
-        const detected = await youtubeDuration(id);
-        add.disabled = false;
-        add.textContent = 'إضافة للقائمة';
-        if (detected) durationMs = detected;
-      } else if (/youtube\.com|youtu\.be/i.test(link)) {
-        showError(error, 'رابط يوتيوب هذا ما ينقرأ. افتح الفيديو وانسخ رابطه من زر المشاركة.');
-        return;
-      }
-      if (!(durationMs >= 1000 && durationMs <= 86400000)) { showError(error, 'المدة لازم تكون بين ثانية و24 ساعة.'); return; }
-      editor.addEntry({
-        url: link, kind: id ? 'youtube' : 'live', name: name.value.trim() || (id ? `يوتيوب ${id}` : fileName(link) || 'بث مباشر'),
-        duration_ms: durationMs, fade_in_ms: 0, fade_out_ms: 0, fit: 'contain',
-      });
-      dialog.close();
-    });
-    dialog.addEventListener('close', () => dialog.remove());
-    document.body.append(dialog);
-    dialog.showModal();
-    url.focus();
-  }
-
   function renderUpload(job) {
     if (job.epoch !== sessionEpoch) return;
     job.name.textContent = job.file.name;
@@ -1725,16 +1835,13 @@
       this.libraryButton = button('اختيار فيديو أو صورة من المكتبة', {
         kind: 'primary', iconName: 'plus', onClick: () => chooseLibrary(this),
       });
-      this.linkButton = button('إضافة رابط يوتيوب / بث مباشر', {
-        kind: 'ghost', iconName: 'plus', onClick: () => addStreamLink(this),
-      });
       this.addError = el('p', { class: 'form-error', hidden: true });
       this.notice = el('div', { class: 'notice', hidden: true });
       this.list = el('div');
       this.footer = el('div', { class: 'pl-footer' });
       this.root = el('div', { class: 'pl-editor' },
-        el('div', { class: 'pl-add' }, this.libraryButton, this.linkButton,
-          el('span', { class: 'muted-text', text: 'ارفع الملفات من تبويب مكتبة الوسائط؛ ما تحتاج روابط.' })),
+        el('div', { class: 'pl-add' }, this.libraryButton,
+          el('span', { class: 'muted-text', text: 'ارفع الملفات من تبويب مكتبة الوسائط. اليوتيوب والبث المباشر من بطاقة العرض الفوري فوق.' })),
         this.addError, this.notice, this.list, this.footer);
       this.render();
     }
@@ -1915,6 +2022,134 @@
     }),
   });
   $('global-playlist').append(globalEditor.root);
+
+  // Instant spotlight above the looping playlist: never cached, never a playlist item.
+  class SpotlightPanel {
+    constructor() {
+      this.saving = false;
+      this.kind = el('select', { 'aria-label': 'نوع العرض الفوري' },
+        el('option', { value: 'youtube', text: 'يوتيوب' }),
+        el('option', { value: 'live', text: 'بث مباشر (m3u8 / mpd)' }));
+      this.url = el('input', { type: 'url', dir: 'ltr', placeholder: 'https://www.youtube.com/watch?v=… أو https://…/index.m3u8', 'aria-label': 'رابط العرض الفوري' });
+      this.name = el('input', { type: 'text', maxlength: '200', 'aria-label': 'اسم العرض' });
+      this.loop = el('input', { type: 'checkbox' });
+      this.loopField = el('label', { class: 'check' }, this.loop, el('span', { text: 'كرر الفيديو تلقائياً (يوتيوب فقط)' }));
+      this.error = el('p', { class: 'form-error', hidden: true });
+      this.status = el('div', { class: 'spotlight-status' });
+      this.showButton = button('اعرض الآن على كل الشاشات', { kind: 'primary', iconName: 'play', onClick: () => this.show() });
+      this.stopButton = button('أوقف العرض ورجّع القائمة', { kind: 'danger', iconName: 'x', onClick: () => this.stop() });
+      this.kind.addEventListener('change', () => this.syncKind());
+      this.root = el('div', { class: 'spotlight' },
+        this.status,
+        el('div', { class: 'media-settings' },
+          el('label', { class: 'field' }, el('span', { text: 'النوع' }), this.kind),
+          el('label', { class: 'field' }, el('span', { text: 'الرابط' }), this.url)),
+        el('label', { class: 'field' }, el('span', { text: 'الاسم (اختياري)' }), this.name),
+        this.loopField,
+        el('p', { class: 'muted-text', text: 'ماكو مدة عرض: فيديو اليوتيوب يشتغل لحد ما يخلص وحده، والبث المباشر يبقى لحد ما توقفه. العرض ما ينزّل ولا ينخزن ولا يدخل بقائمة التشغيل.' }),
+        this.error,
+        el('div', { class: 'form-actions' }, this.stopButton, this.showButton));
+      this.syncKind();
+      this.render();
+    }
+
+    syncKind() {
+      this.loopField.hidden = this.kind.value !== 'youtube';
+    }
+
+    active() {
+      const o = state.override;
+      return o && (o.kind === 'youtube' || o.kind === 'live') && str(o.url) && o.ended !== true ? o : null;
+    }
+
+    async show() {
+      if (this.saving || !pinUnlocked) return;
+      const epoch = sessionEpoch;
+      const kind = this.kind.value;
+      const link = this.url.value.trim();
+      showError(this.error, '');
+      if (!isMediaUrl(link)) { showError(this.error, 'الرابط لازم يبدي بـ https://'); return; }
+      if (kind === 'youtube' && !youtubeId(link)) {
+        showError(this.error, 'رابط يوتيوب هذا ما ينقرأ. افتح الفيديو وانسخ رابطه من زر المشاركة (watch أو youtu.be أو shorts أو live).');
+        return;
+      }
+      const name = this.name.value.trim().slice(0, 200)
+        || (kind === 'youtube' ? `يوتيوب ${youtubeId(link)}` : fileName(link) || 'بث مباشر');
+      const payload = { kind, url: link, name, loop: kind === 'youtube' && this.loop.checked, started_at: firebase.database.ServerValue.TIMESTAMP };
+      this.saving = true;
+      this.root.inert = true;
+      this.render();
+      try {
+        await managerWrite(() => db.ref('override').set(payload));
+        if (epoch !== sessionEpoch) return;
+        toast('انعرض فوراً على كل الشاشات.', 'ok');
+      } catch (e) {
+        if (epoch === sessionEpoch) toast(errorText(e), 'bad');
+      } finally {
+        if (epoch === sessionEpoch) { this.saving = false; this.root.inert = false; this.render(); }
+      }
+    }
+
+    async stop() {
+      if (this.saving || !pinUnlocked) return;
+      const epoch = sessionEpoch;
+      if (!(await confirmBox({ title: 'إيقاف العرض الفوري', message: 'راح ترجع كل الشاشات لقائمة التشغيل فوراً. متأكد؟', okText: 'أوقف ورجّع القائمة' }))) return;
+      if (epoch !== sessionEpoch || !pinUnlocked) return;
+      this.saving = true;
+      this.root.inert = true;
+      this.render();
+      try {
+        await managerWrite(() => db.ref('override').remove());
+        if (epoch !== sessionEpoch) return;
+        toast('انوقف العرض ورجعت الشاشات للقائمة.', 'ok');
+      } catch (e) {
+        if (epoch === sessionEpoch) toast(errorText(e), 'bad');
+      } finally {
+        if (epoch === sessionEpoch) { this.saving = false; this.root.inert = false; this.render(); }
+      }
+    }
+
+    reset() {
+      this.saving = false;
+      this.root.inert = false;
+      this.kind.value = 'youtube';
+      this.url.value = '';
+      this.name.value = '';
+      this.loop.checked = false;
+      this.syncKind();
+      showError(this.error, '');
+      this.render();
+    }
+
+    render() {
+      const o = this.active();
+      this.showButton.disabled = this.saving;
+      this.stopButton.disabled = this.saving || !o;
+      if (!state.loaded.has('override')) {
+        this.status.replaceChildren(pill('جاري التحميل…', 'muted'));
+        return;
+      }
+      if (!o) {
+        const ended = state.override && state.override.ended === true;
+        this.status.replaceChildren(
+          pill(ended ? 'انتهى العرض' : 'ماكو عرض فوري', 'muted'),
+          el('span', { class: 'muted-text', text: ended ? 'رجعت الشاشات لقائمة التشغيل. تقدر تعرض شي جديد.' : 'الشاشات تعرض قائمة التشغيل هسه.' }));
+        return;
+      }
+      const isYt = o.kind === 'youtube';
+      const hint = isYt
+        ? (o.loop === true ? 'يتكرر تلقائياً لحد ما توقفه.' : 'يرجع للقائمة من يخلص الفيديو وحده.')
+        : 'بث مستمر لحد ما توقفه بيدك.';
+      const started = num(o.started_at) != null ? ` · بدأ ${timeAgo(o.started_at)}` : '';
+      this.status.replaceChildren(
+        pill(isYt ? 'يوتيوب معروض هسه' : 'بث مباشر معروض هسه', 'ok'),
+        el('strong', { text: str(o.name) || o.url }),
+        el('span', { class: 'muted-text', text: hint + started }));
+    }
+  }
+
+  const spotlightPanel = new SpotlightPanel();
+  $('spotlight-panel').append(spotlightPanel.root);
 
   function openDevicePlaylist(id) {
     const v = deviceView(id);
@@ -2361,7 +2596,7 @@
 
   function renderPin() {
     $('pin-dots').replaceChildren(...Array.from({ length: PIN_LENGTH }, (_, i) =>
-      el('span', { class: `pin-dot${i < pinValue.length ? ' filled' : ''}`, 'aria-hidden': 'true' })));
+      el('span', { class: `pin-dot${i < pinValue.length ? ' filled' : ''}${i === pinValue.length - 1 ? ' pop' : ''}`, 'aria-hidden': 'true' })));
     $('pin-dots').setAttribute('aria-label', `دخلت ${pinValue.length} من ${PIN_LENGTH} أرقام`);
     const waiting = Math.max(0, Math.ceil((retryUntil - Date.now()) / 1000));
     const disabled = pinBusy || !startupReady || waiting > 0;
@@ -2404,6 +2639,24 @@
     }
   }
 
+  // Press feedback driven by pointer events: :active alone is unreliable on
+  // some mobile browsers, so the pressed look is a class held until release.
+  $('pin-keypad').addEventListener('pointerdown', (event) => {
+    const key = event.target.closest('button');
+    if (!key || key.disabled) return;
+    key.classList.add('pressed');
+    try { if (navigator.vibrate) navigator.vibrate(8); } catch { /* no haptics */ }
+    const release = () => {
+      key.classList.remove('pressed');
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', release);
+      key.removeEventListener('pointerleave', release);
+    };
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
+    key.addEventListener('pointerleave', release);
+  });
+
   $('pin-keypad').addEventListener('click', (event) => {
     if (pinBusy || !startupReady || Date.now() < retryUntil) return;
     const key = event.target.closest('button[data-digit]');
@@ -2445,6 +2698,7 @@
       names: {},
       devicePlaylists: {},
       playlist: [],
+      override: null,
       config: null,
       appVersion: null,
       openMenu: null,
@@ -2506,6 +2760,7 @@
     globalEditor.saving = false;
     globalEditor.root.inert = false;
     globalEditor.discard();
+    spotlightPanel.reset();
     updateRenderSignature = '';
     syncSignature = '';
     syncLive = null;
