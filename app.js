@@ -89,6 +89,7 @@
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h9"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   };
 
   function icon(name) {
@@ -205,7 +206,7 @@
   }
 
   const TIMED_KINDS = ['image', 'youtube', 'live'];
-  const KIND_LABELS = { video: 'فيديو', image: 'صورة', youtube: 'يوتيوب', live: 'بث مباشر' };
+  const KIND_LABELS = { video: 'فيديو', image: 'صورة', youtube: 'يوتيوب', live: 'بث مباشر', screen: 'مشاركة شاشة' };
 
   // Mirrors MediaEntry.youtubeId on the TV.
   function youtubeId(url) {
@@ -236,6 +237,7 @@
       fade_in_ms: Math.max(0, num(raw.fade_in_ms) || 0),
       fade_out_ms: Math.max(0, num(raw.fade_out_ms) || 0),
       fit: raw.fit === 'cover' ? 'cover' : 'contain',
+      frame_url: str(raw.frame_url).trim().slice(0, MAX_URL_LENGTH),
     };
   }
 
@@ -265,6 +267,7 @@
       && ['duration_ms', 'fade_in_ms', 'fade_out_ms'].every((key) => Number.isSafeInteger(entry[key]) && entry[key] >= 0)
       && entry.fade_in_ms <= 5000 && entry.fade_out_ms <= 5000
       && entry.fade_in_ms + entry.fade_out_ms <= entry.duration_ms
+      && (!entry.frame_url || isHttpsUrl(entry.frame_url))
       && (entry.kind === 'video' || (entry.duration_ms >= 1000 && entry.duration_ms <= 86400000))
       && (entry.kind !== 'youtube' || !!youtubeId(entry.url));
   }
@@ -453,6 +456,7 @@
     listen('.info/serverTimeOffset', (v) => { state.serverOffset = num(v) || 0; });
     listen('devices', (v) => { state.devices = v && typeof v === 'object' ? v : {}; });
     listen('device_names', (v) => { state.names = v && typeof v === 'object' ? v : {}; });
+    listen('device_offsets', (v) => { state.offsets = v && typeof v === 'object' ? v : {}; });
     listen('device_playlists', (v) => {
       state.devicePlaylists = v && typeof v === 'object' ? v : {};
       if (state.deviceEditor) {
@@ -828,6 +832,7 @@
   function renderGlobalCommands() {
     const grid = $('global-commands');
     const o = activeSpotlight(state.override);
+    const screenOnly = o && o.kind === 'screen';
     grid.replaceChildren(...Object.entries(ACTIONS).map(([action, meta]) => {
       const transport = SYNC_ACTIONS.has(action);
       const shared = !!state.sync && transport;
@@ -835,14 +840,14 @@
         restart: o.kind === 'live' ? 'ارجع للبث الحي / أعد الاتصال' : 'إعادة يوتيوب من البداية' }[action] || meta.label) : meta.label;
       return button(label, {
         iconName: meta.icon,
-        disabled: transport && (!state.loaded.has('override') || (o ? spotlightPanel.saving || ['next', 'previous'].includes(action)
+        disabled: transport && (!state.loaded.has('override') || (o ? spotlightPanel.saving || ['next', 'previous'].includes(action) || screenOnly
           : syncSaving || (!!state.sync && !['sync', 'sync_runtime', 'sync_hold'].every((path) => state.loaded.has(path))))),
         title: o && transport ? 'يتحكم بالعرض الفوري، مو بالقائمة المخفية'
           : shared ? 'الأمر يضبط الساعة المشتركة لكل الشاشات' : null,
         onClick: () => transport ? globalPlaybackAction(action) : sendCommand('commands', action, 'كل الشاشات'),
       });
     }));
-    if (o) grid.append(button('إعادة مزامنة العرض الفوري', { iconName: 'reload', disabled: spotlightPanel.saving,
+    if (o && o.kind !== 'screen') grid.append(button('إعادة مزامنة العرض الفوري', { iconName: 'reload', disabled: spotlightPanel.saving,
       onClick: () => spotlightPanel.transport('resync') }));
   }
 
@@ -901,8 +906,18 @@
   const MAX_TRANSPORT_POSITION_MS = 7 * 24 * 60 * 60 * 1000;
 
   function activeSpotlight(o) {
-    return o && (o.kind === 'youtube' || o.kind === 'live') && str(o.url)
+    return o && (o.kind === 'youtube' || o.kind === 'live' || o.kind === 'screen') && str(o.url)
       && num(o.started_at) != null && o.ended_at !== o.started_at ? o : null;
+  }
+
+  function waitIceComplete(conn) {
+    if (conn.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, 4000);
+      conn.addEventListener('icegatheringstatechange', () => {
+        if (conn.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
+      });
+    });
   }
 
   function sameTransport(a, b) {
@@ -1180,6 +1195,7 @@
       online,
       lastSeen,
       state: str(d.state),
+      offset: num(state.offsets[id]),
       d,
     };
   }
@@ -1319,6 +1335,7 @@
           CLOCK_SOURCES[str(d.clock_source)] ? ` · ${CLOCK_SOURCES[str(d.clock_source)]}` : null));
       }
     }
+    body.append(kv('تعويض التوقيت', v.offset ? ltr(`${v.offset} ms`) : 'بدون'));
     if (v.online && startedAt) {
       body.append(kv('شغّالة من', duration(serverNow() - startedAt)));
     } else if (v.lastSeen) {
@@ -1351,6 +1368,7 @@
     el('div', { class: 'menu-list' },
       menuItem('قائمة تشغيل خاصة', 'list', () => openDevicePlaylist(v.id)),
       menuItem('تغيير الاسم', 'edit', () => renameDevice(v.id)),
+      menuItem('تعويض التوقيت (ms)', 'clock', () => setDeviceOffset(v.id)),
       el('hr'),
       menuItem(ACTIONS.restart.label, 'restart', () => send('restart')),
       menuItem(ACTIONS.reload.label, 'reload', () => send('reload')),
@@ -1405,8 +1423,33 @@
     renderDevices();
   });
 
-  function renameDevice(id) {
+  function setDeviceOffset(id) {
     const v = deviceView(id);
+    const input = el('input', { type: 'number', step: '10', min: '-500', max: '500', value: String(v.offset ?? 0) });
+    const error = el('p', { class: 'form-error', hidden: true });
+    const save = async () => {
+      const value = Math.round(Number(input.value));
+      if (!Number.isFinite(value) || value < -500 || value > 500) { showError(error, 'ادخل رقم صحيح بين -500 و 500.'); return; }
+      try {
+        await managerWrite(() => value ? db.ref(`device_offsets/${id}`).set(value) : db.ref(`device_offsets/${id}`).remove());
+        dialog.close();
+        toast('انحفظ التعويض.', 'ok');
+      } catch (e) {
+        showError(error, errorText(e));
+      }
+    };
+    input.addEventListener('keydown', (event) => { if (event.key === 'Enter') save(); });
+    const dialog = openModal({
+      title: `تعويض توقيت ${v.code}`,
+      body: [el('label', { class: 'field' }, el('span', { text: 'الإزاحة (ميلي ثانية)' }), input),
+        el('p', { class: 'muted-text', style: 'margin:0', text: 'إذا الشاشة سبّاقة على البقية، حط رقم موجب حتى تتأخر. وإذا متأخرة، حط سالب. صفر يعني بدون تعويض.' }), error],
+      actions: [button('إلغاء', { kind: 'ghost', onClick: () => dialog.close() }), button('حفظ', { kind: 'primary', onClick: save })],
+    });
+    input.focus();
+    input.select();
+  }
+
+  function renameDevice(id) {    const v = deviceView(id);
     const input = el('input', { type: 'text', maxlength: '60', value: v.name, placeholder: v.model || 'مثلاً: شاشة الاستقبال' });
     const error = el('p', { class: 'form-error', hidden: true });
     const save = async () => {
@@ -1445,6 +1488,7 @@
         [`device_names/${id}`]: null,
         [`device_playlists/${id}`]: null,
         [`device_commands/${id}`]: null,
+        [`device_offsets/${id}`]: null,
       }));
       toast('انحذفت الشاشة من اللوحة.', 'ok');
     } catch (e) {
@@ -1469,6 +1513,7 @@
   const activePreviews = new Set();
   let libraryPickerRefresh = null;
   let libraryPickerClose = null;
+  let framePickerClose = null;
 
   function validateFile(file) {
     const spec = Object.hasOwn(MIME_TYPES, file.type) ? MIME_TYPES[file.type] : null;
@@ -1661,7 +1706,7 @@
 
   async function deleteAsset(asset) {
     const inUse = [state.playlist, ...Object.values(state.devicePlaylists).map(toMediaList)]
-      .some((list) => list.some((entry) => entry.url === asset.url));
+      .some((list) => list.some((entry) => entry.url === asset.url || entry.frame_url === asset.url));
     if (inUse) {
       toast(`«${asset.name}» مستخدم بقائمة تشغيل. شيله من القوائم واحفظها أولاً، بعدين احذفه.`, 'bad');
       return;
@@ -2062,7 +2107,53 @@
           fields.push(el('label', { class: 'field' }, el('span', { text: label }), input));
         }
       }
+      if (entry.kind === 'video') fields.push(this.frameField(entry));
       return el('div', { class: 'media-settings' }, fields);
+    }
+
+    frameField(entry) {
+      const input = el('input', { type: 'url', dir: 'ltr', placeholder: 'https://…/frame.jpg', value: entry.frame_url || '', 'aria-label': `إطار ${entry.name}` });
+      const thumb = el('img', { class: 'frame-thumb', alt: '' });
+      const preview = el('div', { class: 'frame-pick-preview', hidden: true }, thumb);
+      const sync = () => {
+        const url = input.value.trim();
+        preview.hidden = !url;
+        if (url) { thumb.src = url; thumb.onerror = () => { preview.hidden = true; }; }
+      };
+      input.addEventListener('input', () => { entry.frame_url = input.value.trim(); sync(); this.changed(true); });
+      return el('div', { class: 'frame-field' },
+        el('span', { text: 'إطار مخصص للفيديو (اختياري)' }),
+        el('div', { class: 'frame-pick-row' },
+          input,
+          button('من المكتبة', { kind: 'ghost sm', iconName: 'plus', onClick: () => this.pickFrameImage(entry, input, sync) }),
+          button('شيل', { kind: 'ghost sm', iconName: 'x', onClick: () => { input.value = ''; entry.frame_url = ''; sync(); this.changed(true); } })),
+        preview,
+        el('small', { class: 'muted-text', text: 'صورة جانبية تظهر خلف الفيديو الطولي. بدونها يظهر الإطار العام للشاشة.' }));
+    }
+
+    pickFrameImage(entry, input, sync) {
+      if (framePickerClose) framePickerClose();
+      const list = el('div', { class: 'library-grid' });
+      const dialog = el('dialog', { class: 'modal' }, el('div', { class: 'modal-card wide' },
+        el('div', { class: 'modal-head' }, el('h2', { text: 'اختيار صورة إطار من المكتبة' }),
+          button('إغلاق', { kind: 'ghost sm', iconName: 'x', iconOnly: true, onClick: () => dialog.close() })),
+        el('div', { class: 'modal-body' }, el('p', { class: 'muted-text', text: 'اختَر صورة جاهزة للإطار. تنحفظ كإطار مخصص لهذا الفيديو.' }), list)));
+      const refresh = () => {
+        const images = libraryAssets().filter((asset) => asset.kind === 'image');
+        list.replaceChildren(...(images.length ? images.map((asset) => assetCard(asset, () => {
+          input.value = asset.url;
+          entry.frame_url = asset.url;
+          sync();
+          this.changed(true);
+          dialog.close();
+        }, 'اختَر إطار')) : [el('p', { class: 'muted-text', text: 'ماكو صور بالمكتبة. ارفع صورة الإطار من تبويب مكتبة الوسائط أولاً.' })]));
+      };
+      const close = () => { if (dialog.open) dialog.close(); dialog.remove(); if (framePickerClose === close) framePickerClose = null; };
+      dialog.addEventListener('close', close);
+      framePickerClose = close;
+      refresh();
+      document.body.append(dialog);
+      dialog.showModal();
     }
 
     move(index, delta) {
@@ -2092,7 +2183,11 @@
       this.root.inert = true;
       this.render();
       try {
-        const saved = cloneList(this.items);
+        const saved = cloneList(this.items).map((entry) => {
+          const clean = { ...entry };
+          if (!clean.frame_url) delete clean.frame_url;
+          return clean;
+        });
         await managerWrite(() => this.onSave(saved));
         if (epoch !== sessionEpoch) return;
         this.remote = saved;
@@ -2169,13 +2264,25 @@
   class SpotlightPanel {
     constructor() {
       this.saving = false;
+      this.sender = null;
       this.kind = el('select', { 'aria-label': 'نوع العرض الفوري' },
         el('option', { value: 'youtube', text: 'يوتيوب' }),
-        el('option', { value: 'live', text: 'بث مباشر (m3u8 / mpd)' }));
+        el('option', { value: 'live', text: 'بث مباشر (m3u8 / mpd)' }),
+        el('option', { value: 'screen', text: 'مشاركة شاشة اللابتوب' }));
       this.url = el('input', { type: 'url', dir: 'ltr', placeholder: 'https://www.youtube.com/watch?v=… أو https://…/index.m3u8', 'aria-label': 'رابط العرض الفوري' });
       this.name = el('input', { type: 'text', maxlength: '200', 'aria-label': 'اسم العرض' });
       this.loop = el('input', { type: 'checkbox' });
       this.loopField = el('label', { class: 'check' }, this.loop, el('span', { text: 'كرر الفيديو تلقائياً (يوتيوب فقط)' }));
+      this.resolution = el('select', { 'aria-label': 'دقة الالتقاط' },
+        el('option', { value: 'auto', text: 'تلقائي (حسب اختيارك بالحوار)' }),
+        el('option', { value: '1080p', text: '1080p (1920×1080)' }),
+        el('option', { value: '720p', text: '720p (1280×720)' }),
+        el('option', { value: '480p', text: '480p (854×480)' }));
+      this.urlField = el('label', { class: 'field' }, el('span', { text: 'الرابط' }), this.url);
+      this.nameField = el('label', { class: 'field' }, el('span', { text: 'الاسم (اختياري)' }), this.name);
+      this.screenField = el('div', { class: 'media-settings', hidden: true },
+        el('label', { class: 'field' }, el('span', { text: 'دقة الالتقاط' }), this.resolution),
+        el('p', { class: 'muted-text', text: 'من يضغط «مشاركة» يفتح حوار اختار بيه الشاشة أو نافذة البرنامج (مثل المتصفح). البث يكون من هذا الجهاز ومباشر لكل الشاشات بدون تأثير على بقية شغلك، وتقدر تكمل المبيعات عادي.' }));
       this.error = el('p', { class: 'form-error', hidden: true });
       this.status = el('div', { class: 'spotlight-status', role: 'status' });
       this.timing = el('p', { class: 'muted-text' });
@@ -2193,9 +2300,10 @@
         el('p', { class: 'notice', text: 'تنبيه البث المباشر: فقط البث المباشر ذو الطوابع الزمنية المشتركة يقدر يتزامن. واجهة YouTube Live ما تضمن تطابق الفريم بين الشاشات. الرجوع للبث الحي يعيد الاتصال، مو ضمان تزامن الصورة.' }),
         el('div', { class: 'media-settings' },
           el('label', { class: 'field' }, el('span', { text: 'النوع' }), this.kind),
-          el('label', { class: 'field' }, el('span', { text: 'الرابط' }), this.url)),
-        el('label', { class: 'field' }, el('span', { text: 'الاسم (اختياري)' }), this.name),
+          this.urlField),
+        this.nameField,
         this.loopField,
+        this.screenField,
         el('p', { class: 'muted-text', text: 'ماكو مدة عرض: فيديو اليوتيوب يشتغل لحد ما يخلص وحده، والبث المباشر يبقى لحد ما توقفه. العرض ما ينزّل ولا ينخزن ولا يدخل بقائمة التشغيل.' }),
         this.error,
         el('div', { class: 'form-actions' }, this.showButton));
@@ -2204,7 +2312,12 @@
     }
 
     syncKind() {
-      this.loopField.hidden = this.kind.value !== 'youtube';
+      const screen = this.kind.value === 'screen';
+      this.loopField.hidden = screen || this.kind.value !== 'youtube';
+      this.urlField.hidden = screen;
+      this.nameField.hidden = screen;
+      this.screenField.hidden = !screen;
+      this.showButton.textContent = screen ? 'مشاركة الشاشة بعد 5 ثواني' : 'اعرض على كل الشاشات بعد 5 ثواني';
     }
 
     active() {
@@ -2212,25 +2325,27 @@
     }
 
     async writeTransport(expected, change, success, confirmation = null) {
-      if (this.saving || !pinUnlocked || !state.loaded.has('override')) return;
+      if (this.saving || !pinUnlocked || !state.loaded.has('override')) return false;
       const epoch = sessionEpoch;
       this.saving = true;
       this.root.inert = true;
       this.render();
       renderGlobalCommands();
       try {
-        if (confirmation && !(await confirmBox(confirmation))) return;
-        if (epoch !== sessionEpoch || !pinUnlocked) return;
+        if (confirmation && !(await confirmBox(confirmation))) return false;
+        if (epoch !== sessionEpoch || !pinUnlocked) return false;
         const result = await managerWrite(() => db.ref('override').transaction((current) => {
           if (epoch !== sessionEpoch || !pinUnlocked || Date.now() >= sessionDeadline || !state.connected
             || !sameTransport(expected, current)) return undefined;
           return change(current);
         }, undefined, false));
-        if (epoch !== sessionEpoch) return;
+        if (epoch !== sessionEpoch) return false;
         if (!result.committed) throw new Error('transport-changed');
         toast(success, 'ok');
+        return true;
       } catch (e) {
         if (epoch === sessionEpoch) toast(errorText(e), 'bad');
+        return false;
       } finally {
         if (epoch === sessionEpoch) {
           this.saving = false;
@@ -2243,9 +2358,10 @@
 
     async show() {
       if (this.saving || !pinUnlocked || !state.loaded.has('override')) return;
-      const kind = this.kind.value;
-      const link = this.url.value.trim();
       showError(this.error, '');
+      const kind = this.kind.value;
+      if (kind === 'screen') return this.showScreen();
+      const link = this.url.value.trim();
       if (!isMediaUrl(link)) { showError(this.error, 'الرابط لازم يبدي بـ https://'); return; }
       if (kind === 'youtube' && !youtubeId(link)) {
         showError(this.error, 'رابط يوتيوب هذا ما ينقرأ. افتح الفيديو وانسخ رابطه من زر المشاركة (watch أو youtu.be أو shorts أو live).');
@@ -2259,20 +2375,88 @@
       return this.writeTransport(expected, () => payload, 'تجدول العرض بعد 5 ثواني حتى تستعد الشاشات.');
     }
 
+    async showScreen() {
+      if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+        showError(this.error, 'مشاركة الشاشة تشتغل بس من اللابتوب أو الكمبيوتر (كروم أو إيدج). الموبايل ما يدعمها.');
+        return;
+      }
+      const session = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-6);
+      let stream;
+      try {
+        const video = { frameRate: { ideal: 30, max: 30 } };
+        const resolution = this.resolution.value;
+        if (resolution === '1080p') Object.assign(video, { width: 1920, height: 1080 });
+        else if (resolution === '720p') Object.assign(video, { width: 1280, height: 720 });
+        else if (resolution === '480p') Object.assign(video, { width: 854, height: 480 });
+        stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false });
+      } catch (e) {
+        if (String(e && e.name) !== 'NotAllowedError' && String(e && e.name) !== 'AbortError') {
+          showError(this.error, 'ما كدرت أفتح مشاركة الشاشة. استخدم متصفح كروم أو إيدج.');
+        }
+        return;
+      }
+      if (!stream || !stream.getVideoTracks().length) {
+        showError(this.error, 'ما التقطت صورة من الشاشة. جرّب مرة ثانية.');
+        return;
+      }
+      this.teardownSender();
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] });
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      this.sender = { pc, stream, session, answerListener: null };
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) videoTrack.onended = () => { this.stop(); };
+      try {
+        await pc.setLocalDescription(await pc.createOffer());
+        await waitIceComplete(pc);
+        const sdp = pc.localDescription ? pc.localDescription.sdp : '';
+        if (!sdp) throw new Error('no-sdp');
+        await db.ref(`screen_signal/${session}`).set({ offer: sdp });
+      } catch (e) {
+        this.teardownSender();
+        showError(this.error, 'فشل تجهيز البث. جرّب مرة ثانية.');
+        return;
+      }
+      this.sender.answerListener = db.ref(`screen_signal/${session}/answer`).on('child_added', (snap) => {
+        const sdp = snap.val();
+        if (typeof sdp === 'string' && this.sender && this.sender.pc) {
+          this.sender.pc.setRemoteDescription({ type: 'answer', sdp }).catch(() => {});
+        }
+      });
+      const payload = { kind: 'screen', url: `${PAGES_BASE}screen.html?s=${session}`, name: 'مشاركة شاشة',
+        loop: false, started_at: Math.round(serverNow() + 5000), position_ms: 0 };
+      const expected = state.override ? { ...state.override } : null;
+      const ok = await this.writeTransport(expected, () => payload, 'تجدولت مشاركة الشاشة بعد 5 ثواني.');
+      if (!ok) this.teardownSender();
+    }
+
+    teardownSender() {
+      if (!this.sender) return;
+      const { pc, stream, session, answerListener } = this.sender;
+      this.sender = null;
+      if (answerListener) db.ref(`screen_signal/${session}/answer`).off('child_added', answerListener);
+      try { pc.close(); } catch (e) {}
+      if (stream) stream.getTracks().forEach((track) => track.stop());
+      db.ref(`screen_signal/${session}`).remove().catch(() => {});
+    }
+
     async transport(action) {
-      if (this.saving || !pinUnlocked) return;
+      if (this.saving || !pinUnlocked) return false;
       const active = this.active();
-      if (!active) { toast('ماكو عرض فوري فعّال هسه.'); return; }
-      if (action === 'pause' && num(active.paused_at) != null) { toast('الإيقاف المؤقت مضبوط أصلاً.'); return; }
-      if (action === 'play' && num(active.paused_at) == null) { toast('العرض شغّال أو مجدول أصلاً.'); return; }
-      if (!['pause', 'play', 'restart', 'resync', 'stop'].includes(action)) return;
+      if (!active) { toast('ماكو عرض فوري فعّال هسه.'); return false; }
+      if (active.kind === 'screen' && action !== 'stop') { toast('مشاركة الشاشة بث حي، بس تقدر توقفه.'); return false; }
+      if (action === 'pause' && num(active.paused_at) != null) { toast('الإيقاف المؤقت مضبوط أصلاً.'); return false; }
+      if (action === 'play' && num(active.paused_at) == null) { toast('العرض شغّال أو مجدول أصلاً.'); return false; }
+      if (!['pause', 'play', 'restart', 'resync', 'stop'].includes(action)) return false;
       const expected = { ...active };
       const now = serverNow();
       const labels = { pause: 'تجدول الإيقاف المؤقت لكل الشاشات.', play: 'تجدول الاستئناف بعد 5 ثواني.',
         restart: active.kind === 'live' ? 'تجدول الرجوع للبث الحي وإعادة الاتصال بعد 5 ثواني.' : 'تجدولت إعادة يوتيوب من البداية بعد 5 ثواني.',
         resync: 'تجدولت إعادة المزامنة من الموضع المشترك بعد 5 ثواني.', stop: 'انوقف العرض ورجعت الشاشات للقائمة.' };
-      return this.writeTransport(expected, (current) => spotlightTransport(current, action, now), labels[action],
+      const wasScreen = active.kind === 'screen';
+      const result = await this.writeTransport(expected, (current) => spotlightTransport(current, action, now), labels[action],
         action === 'stop' ? { title: 'إيقاف العرض الفوري', message: 'راح ترجع كل الشاشات لقائمة التشغيل فوراً. متأكد؟', okText: 'أوقف ورجّع القائمة' } : null);
+      if (wasScreen && action === 'stop') this.teardownSender();
+      return result;
     }
 
     stop() {
@@ -2280,12 +2464,14 @@
     }
 
     reset() {
+      this.teardownSender();
       this.saving = false;
       this.root.inert = false;
       this.kind.value = 'youtube';
       this.url.value = '';
       this.name.value = '';
       this.loop.checked = false;
+      this.resolution.value = 'auto';
       this.syncKind();
       showError(this.error, '');
       this.render();
@@ -2294,7 +2480,9 @@
     render() {
       const o = this.active();
       this.showButton.disabled = this.saving || !state.loaded.has('override');
-      for (const control of [this.stopButton, this.pauseButton, this.restartButton, this.resyncButton]) control.disabled = this.saving || !o;
+      for (const control of [this.stopButton, this.pauseButton, this.restartButton, this.resyncButton]) {
+        control.disabled = this.saving || !o || (o?.kind === 'screen' && control !== this.stopButton);
+      }
       this.pauseButton.textContent = num(o?.paused_at) != null ? 'استئناف العرض (بعد 5 ثواني)' : 'إيقاف مؤقت مجدول';
       this.restartButton.textContent = o?.kind === 'live' ? 'ارجع للبث الحي / أعد الاتصال' : 'إعادة يوتيوب من البداية';
       this.timing.hidden = this.drift.hidden = !o;
@@ -2310,15 +2498,18 @@
         return;
       }
       const isYt = o.kind === 'youtube';
+      const isScreen = o.kind === 'screen';
       const hint = isYt
         ? (o.loop === true ? 'يتكرر تلقائياً لحد ما توقفه.' : 'يرجع للقائمة من يخلص الفيديو وحده.')
+        : isScreen ? 'بث حي من اللابتوب لكل الشاشات. إذا وقفت المشاركة أو قفلت الصفحة، اضغط «أوقف العرض» حتى ترجع الشاشات للقائمة.'
         : 'بث مستمر لحد ما توقفه بيدك.';
       const now = serverNow();
       this.status.replaceChildren(
-        pill(isYt ? 'عرض يوتيوب' : 'بث مباشر', 'ok'),
+        pill(isScreen ? 'مشاركة شاشة' : isYt ? 'عرض يوتيوب' : 'بث مباشر', 'ok'),
         el('strong', { text: str(o.name) || o.url }),
         el('span', { class: 'muted-text', text: hint }));
-      this.timing.textContent = `${transportTiming(o.started_at, num(o.paused_at), now)} · موضع الساعة المشتركة ${clock(spotlightPosition(o, now))}${o.loop ? ' (زمن تراكمي للتكرار، مو مدة الفيديو)' : ''}`;
+      this.timing.textContent = isScreen ? transportTiming(o.started_at, num(o.paused_at), now)
+        : `${transportTiming(o.started_at, num(o.paused_at), now)} · موضع الساعة المشتركة ${clock(spotlightPosition(o, now))}${o.loop ? ' (زمن تراكمي للتكرار، مو مدة الفيديو)' : ''}`;
       this.drift.textContent = measuredDriftSummary(o);
     }
   }

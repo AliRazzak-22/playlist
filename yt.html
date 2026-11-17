@@ -32,9 +32,39 @@
     if (v <= 0) player.mute(); else { player.unMute(); player.setVolume(Math.round(v * 100)); }
   }
 
+  var QUALITY = { '1080p': 'hd1080', '720p': 'hd720', '480p': 'large', '360p': 'medium', '240p': 'small' };
+  // Set once: re-forcing on every quality event makes the player switch streams and rebuffer.
   function lockQuality() {
-    if (quality && player && player.setPlaybackQuality) player.setPlaybackQuality(quality);
+    var q = QUALITY[quality];
+    if (q && player && player.setPlaybackQuality) player.setPlaybackQuality(q);
   }
+
+  // getCurrentTime() arrives from the iframe by postMessage, late by a varying amount. Sampling
+  // often and keeping the freshest (largest) time-minus-clock offset gives a steady position.
+  var offsets = [], lastRaw = -1;
+  function resetClock() { offsets = []; lastRaw = -1; }
+  function sampleClock() {
+    if (!player || !player.getCurrentTime || !player.getPlayerState) return;
+    if (player.getPlayerState() !== 1) { resetClock(); return; }
+    var raw = (player.getCurrentTime() || 0) * 1000, now = performance.now();
+    if (raw === lastRaw) return;
+    lastRaw = raw;
+    var off = raw - now;
+    if (offsets.length && Math.abs(off - best()) > 250) offsets = [];
+    offsets.push({ off: off, at: now });
+    while (offsets.length && now - offsets[0].at > 2000) offsets.shift();
+  }
+  function best() {
+    var m = -Infinity;
+    for (var i = 0; i < offsets.length; i++) if (offsets[i].off > m) m = offsets[i].off;
+    return m;
+  }
+  function position() {
+    if (!player || !player.getCurrentTime) return 0;
+    if (player.getPlayerState && player.getPlayerState() === 1 && offsets.length >= 2) return (best() + performance.now()) / 1000;
+    return player.getCurrentTime() || 0;
+  }
+  setInterval(sampleClock, 15);
 
   function create(id, loadGeneration) {
     if (loadGeneration !== generation) return;
@@ -49,7 +79,7 @@
     var instance = new YT.Player('yt', {
       videoId: id,
       playerVars: { autoplay: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, modestbranding: 1,
-        playsinline: 1, rel: 0, start: Math.floor(startAt), mute: 1, origin: location.origin, vq: quality || undefined },
+        playsinline: 1, rel: 0, start: Math.floor(startAt), mute: 1, origin: location.origin },
       events: {
         onReady: function (e) {
           if (!current(e) || primed) return;
@@ -67,11 +97,9 @@
             vol(volume);
           } else if (primed && !ready && e.data === YT.PlayerState.PAUSED) {
             ready = true;
-          } else if (e.data === YT.PlayerState.PLAYING) {
-            lockQuality();
           }
+          if (e.data !== YT.PlayerState.PLAYING) resetClock();
         },
-        onPlaybackQualityChange: function (e) { if (current(e)) lockQuality(); },
         onError: function (e) { if (current(e)) error = e.data || 1; }
       }
     });
@@ -84,6 +112,7 @@
     pending = null;
     destroyPlayer();
     document.getElementById('box').className = portrait ? 'portrait' : '';
+    resetClock();
     startAt = Math.max(0, sec); volume = v; quality = q || ''; ready = false; primed = false; error = 0; live = false;
     if (!apiReady) { pending = { id: id, generation: generation }; return; }
     create(id, generation);
@@ -98,7 +127,7 @@
     load: load,
     play: function () { if (player && player.playVideo) player.playVideo(); },
     pause: function () { if (player && player.pauseVideo) player.pauseVideo(); },
-    seek: function (s) { if (player && player.seekTo) player.seekTo(Math.max(0, s), true); },
+    seek: function (s) { resetClock(); if (player && player.seekTo) player.seekTo(Math.max(0, s), true); },
     volume: function (v) { volume = v; vol(v); },
     stop: function () {
       generation++; stateGeneration = null; pending = null;
@@ -107,7 +136,7 @@
     },
     state: function () {
       var ok = !!(player && player.getPlayerState);
-      return { g: stateGeneration, r: ready, s: ok ? player.getPlayerState() : -1, t: ok ? (player.getCurrentTime() || 0) : 0,
+      return { g: stateGeneration, r: ready, s: ok ? player.getPlayerState() : -1, t: ok ? position() : 0,
         d: ok ? (player.getDuration() || 0) : 0, e: error || (apiFailed && stateGeneration != null ? 1 : 0), l: live };
     }
   };

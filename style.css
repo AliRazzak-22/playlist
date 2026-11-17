@@ -301,3 +301,7 @@ input[type=file]::file-selector-button { font: inherit; padding: 8px 12px; borde
 .frame-preview { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; border-radius: 12px; border: 1px solid rgba(127, 127, 127, 0.35); background: #000; }
 .frame-thumb { width: 192px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px; border: 1px solid rgba(127, 127, 127, 0.35); }
 .frame-current { margin-bottom: 12px; }
+.frame-field { grid-column: 1 / -1; display: grid; gap: 6px; }
+.frame-pick-row { display: flex; gap: 6px; align-items: center; }
+.frame-pick-row input { flex: 1; min-width: 0; }
+.frame-pick-preview .frame-thumb { width: 160px; }

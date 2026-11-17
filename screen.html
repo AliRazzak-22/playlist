@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>مشاركة الشاشة</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif; color: #fff; }
+    #video {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      object-fit: contain; background: #000;
+    }
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 12px; text-align: center;
+      padding: 24px; pointer-events: none; transition: opacity .4s ease;
+    }
+    #overlay.hidden { opacity: 0; }
+    .spinner {
+      width: 42px; height: 42px; border-radius: 50%;
+      border: 4px solid rgba(255,255,255,.2); border-top-color: #fff;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #status { font-size: 18px; font-weight: 600; }
+    #detail { font-size: 13px; opacity: .7; max-width: 80vw; }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay playsinline muted></video>
+  <div id="overlay">
+    <div class="spinner" aria-hidden="true"></div>
+    <div id="status">جاري الاتصال بالبث…</div>
+    <div id="detail"></div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-database-compat.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    const params = new URLSearchParams(location.search);
+    const session = (params.get('s') || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+    const deviceId = (params.get('d') || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+    const status = document.getElementById('status');
+    const detail = document.getElementById('detail');
+    const overlay = document.getElementById('overlay');
+    const video = document.getElementById('video');
+
+    function say(text, extra) {
+      status.textContent = text;
+      detail.textContent = extra || '';
+    }
+
+    if (!session || !deviceId) {
+      say('رابط البث ناقص', 'لازم يتوفر معرّف الجلسة ومعرّف الشاشة.');
+      return;
+    }
+
+    const FIREBASE_CONFIG = {
+      apiKey: 'AIzaSyACHSjXB-UVG418YSsyedNPV48QbIB9OWA',
+      authDomain: 'send-files-to-tv-d371a.firebaseapp.com',
+      databaseURL: 'https://send-files-to-tv-d371a-default-rtdb.firebaseio.com',
+      projectId: 'send-files-to-tv-d371a',
+    };
+    const ICE_SERVERS = [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    ];
+
+    firebase.initializeApp(FIREBASE_CONFIG);
+    const db = firebase.database();
+    const offerRef = db.ref(`screen_signal/${session}/offer`);
+    const answerRef = db.ref(`screen_signal/${session}/answer/${deviceId}`);
+
+    let pc = null;
+    let answering = false;
+    let lastOffer = null;
+
+    function closePeer() {
+      if (pc) { try { pc.close(); } catch (e) {} pc = null; }
+    }
+
+    function waitIceComplete(conn) {
+      if (conn.iceGatheringState === 'complete') return Promise.resolve();
+      return new Promise((resolve) => {
+        const timer = setTimeout(resolve, 4000);
+        conn.addEventListener('icegatheringstatechange', () => {
+          if (conn.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
+        }, { once: false });
+      });
+    }
+
+    async function answer(offerSdp) {
+      if (!offerSdp || offerSdp === lastOffer) return;
+      lastOffer = offerSdp;
+      closePeer();
+      answering = true;
+      say('تم استلام البث، جاري الربط…', '');
+      const conn = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      pc = conn;
+      conn.onicecandidate = () => {};
+      conn.oniceconnectionstatechange = () => {
+        const s = conn.iceConnectionState;
+        if (s === 'connected' || s === 'completed') {
+          overlay.classList.add('hidden');
+          say('متصل', '');
+        } else if (s === 'failed' || s === 'disconnected') {
+          overlay.classList.remove('hidden');
+          say('انقطع الاتصال، جاري إعادة الربط…', '');
+        }
+      };
+      conn.ontrack = (event) => {
+        video.srcObject = event.streams[0] || new MediaStream([event.track]);
+        overlay.classList.add('hidden');
+        say('متصل', '');
+      };
+      try {
+        await conn.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+        await conn.setLocalDescription(await conn.createAnswer());
+        await waitIceComplete(conn);
+        const sdp = conn.localDescription ? conn.localDescription.sdp : '';
+        if (sdp) await answerRef.set(sdp);
+        say('تم الربط، بانتظار الصورة…', '');
+      } catch (e) {
+        say('فشل الربط', String(e && e.message || e).slice(0, 120));
+      } finally {
+        answering = false;
+      }
+    }
+
+    offerRef.on('value', (snap) => {
+      const val = snap.val();
+      if (typeof val === 'string') answer(val);
+      else if (!answering) say('ماكو بث نشط هسه', 'انتظر حتى يبدأ العرض من لوحة الإدارة.');
+    });
+  })();
+  </script>
+</body>
+</html>
