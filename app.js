@@ -238,6 +238,8 @@
       fade_out_ms: Math.max(0, num(raw.fade_out_ms) || 0),
       fit: raw.fit === 'cover' ? 'cover' : 'contain',
       frame_url: str(raw.frame_url).trim().slice(0, MAX_URL_LENGTH),
+      frame_left_url: str(raw.frame_left_url).trim().slice(0, MAX_URL_LENGTH),
+      frame_right_url: str(raw.frame_right_url).trim().slice(0, MAX_URL_LENGTH),
       volume: Math.min(1, Math.max(0, num(raw.volume) ?? 1)),
     };
   }
@@ -269,7 +271,7 @@
       && entry.fade_in_ms <= 5000 && entry.fade_out_ms <= 5000
       && entry.fade_in_ms + entry.fade_out_ms <= entry.duration_ms
       && Number.isFinite(entry.volume) && entry.volume >= 0 && entry.volume <= 1
-      && (!entry.frame_url || isHttpsUrl(entry.frame_url))
+      && ['frame_url', 'frame_left_url', 'frame_right_url'].every((key) => !entry[key] || isHttpsUrl(entry[key]))
       && (entry.kind === 'video' || (entry.duration_ms >= 1000 && entry.duration_ms <= 86400000))
       && (entry.kind !== 'youtube' || !!youtubeId(entry.url));
   }
@@ -1728,7 +1730,7 @@
 
   async function deleteAsset(asset) {
     const inUse = [state.playlist, ...Object.values(state.devicePlaylists).map(toMediaList)]
-      .some((list) => list.some((entry) => entry.url === asset.url || entry.frame_url === asset.url));
+      .some((list) => list.some((entry) => entry.url === asset.url || ['frame_url', 'frame_left_url', 'frame_right_url'].some((key) => entry[key] === asset.url)));
     if (inUse) {
       toast(`«${asset.name}» مستخدم بقائمة تشغيل. شيله من القوائم واحفظها أولاً، بعدين احذفه.`, 'bad');
       return;
@@ -2135,12 +2137,21 @@
         input.addEventListener('input', () => { entry.volume = Number(input.value) / 100; level.textContent = `${input.value}%`; this.changed(true); });
         fields.push(el('label', { class: 'field' }, el('span', { text: 'صوت هذا الفيديو' }), input, level));
       }
-      if (entry.kind === 'video') fields.push(this.frameField(entry));
+      if (entry.kind === 'video') {
+        fields.push(this.frameField(entry, 'frame_right_url', 'الإطار الأيمن'));
+        fields.push(this.frameField(entry, 'frame_left_url', 'الإطار الأيسر'));
+        if (entry.frame_url) fields.push(el('div', { class: 'frame-field' },
+          el('span', { class: 'muted-text', text: 'الإطار المحفوظ لهذا الفيديو' }),
+          el('img', { class: 'frame-thumb', src: entry.frame_url, alt: 'الإطار المحفوظ' }),
+          button('إزالة الإطار كله', { kind: 'ghost sm', onClick: () => {
+            entry.frame_url = ''; entry.frame_left_url = ''; entry.frame_right_url = ''; this.changed();
+          } })));
+      }
       return el('div', { class: 'media-settings' }, fields);
     }
 
-    frameField(entry) {
-      const input = el('input', { type: 'url', dir: 'ltr', placeholder: 'https://…/frame.jpg', value: entry.frame_url || '', 'aria-label': `إطار ${entry.name}` });
+    frameField(entry, key, label) {
+      const input = el('input', { type: 'url', dir: 'ltr', placeholder: 'https://…/frame.jpg', value: entry[key] || '', 'aria-label': `${label} ${entry.name}` });
       const thumb = el('img', { class: 'frame-thumb', alt: '' });
       const name = el('span', { class: 'muted-text' });
       const preview = el('div', { class: 'frame-pick-preview', hidden: true }, thumb, name);
@@ -2152,29 +2163,30 @@
         else { thumb.removeAttribute('src'); thumb.hidden = true; }
       };
       sync();
-      input.addEventListener('input', () => { entry.frame_url = input.value.trim(); sync(); this.changed(true); });
+      input.addEventListener('input', () => { entry[key] = input.value.trim(); entry.frame_url = ''; sync(); this.changed(true); });
       return el('div', { class: 'frame-field' },
-        el('span', { text: 'إطار مخصص للفيديو (اختياري)' }),
+        el('span', { text: `${label} (اختياري)` }),
         el('div', { class: 'frame-pick-row' },
           input,
-          button('من المكتبة', { kind: 'ghost sm', iconName: 'plus', onClick: () => this.pickFrameImage(entry, input, sync) }),
-          button('شيل', { kind: 'ghost sm', iconName: 'x', onClick: () => { input.value = ''; entry.frame_url = ''; sync(); this.changed(true); } })),
+          button('من المكتبة', { kind: 'ghost sm', iconName: 'plus', onClick: () => this.pickFrameImage(entry, key, label, input, sync) }),
+          button('شيل', { kind: 'ghost sm', iconName: 'x', onClick: () => { input.value = ''; entry[key] = ''; entry.frame_url = ''; sync(); this.changed(true); } })),
         preview,
-        el('small', { class: 'muted-text', text: 'صورة جانبية تظهر خلف الفيديو الطولي. بدونها يظهر الإطار العام للشاشة.' }));
+        el('small', { class: 'muted-text', text: 'اختَر صورة من المكتبة لكل جانب. تنحفظ ويّا الفيديو؛ الجانب الفارغ يكون أسود إذا اخترت الجانب الثاني.' }));
     }
 
-    pickFrameImage(entry, input, sync) {
+    pickFrameImage(entry, key, label, input, sync) {
       if (framePickerClose) framePickerClose();
       const list = el('div', { class: 'library-grid' });
       const dialog = el('dialog', { class: 'modal' }, el('div', { class: 'modal-card wide' },
-        el('div', { class: 'modal-head' }, el('h2', { text: 'اختيار صورة إطار من المكتبة' }),
+        el('div', { class: 'modal-head' }, el('h2', { text: `اختيار ${label} من المكتبة` }),
           button('إغلاق', { kind: 'ghost sm', iconName: 'x', iconOnly: true, onClick: () => dialog.close() })),
         el('div', { class: 'modal-body' }, el('p', { class: 'muted-text', text: 'اختَر صورة جاهزة للإطار. تنحفظ كإطار مخصص لهذا الفيديو.' }), list)));
       const refresh = () => {
         const images = libraryAssets().filter((asset) => asset.kind === 'image');
         list.replaceChildren(...(images.length ? images.map((asset) => assetCard(asset, () => {
           input.value = asset.url;
-          entry.frame_url = asset.url;
+          entry[key] = asset.url;
+          entry.frame_url = '';
           sync();
           this.changed(true);
           dialog.close();
@@ -2215,14 +2227,22 @@
       this.root.inert = true;
       this.render();
       try {
-        const saved = cloneList(this.items).map((entry) => {
-          const clean = { ...entry };
-          if (!clean.frame_url) delete clean.frame_url;
-          return clean;
-        });
+        const saved = cloneList(this.items);
+        for (const entry of saved) {
+          if (epoch !== sessionEpoch || !pinUnlocked) return;
+          if (entry.kind === 'video' && (entry.frame_left_url || entry.frame_right_url) && !entry.frame_url) {
+            entry.frame_url = await composePlaylistFrame(entry, (message) => {
+              if (epoch === sessionEpoch) showError(this.addError, message);
+            });
+          }
+          for (const key of ['frame_url', 'frame_left_url', 'frame_right_url']) if (!entry[key]) delete entry[key];
+        }
+        if (epoch !== sessionEpoch || !pinUnlocked) return;
         await managerWrite(() => this.onSave(saved));
         if (epoch !== sessionEpoch) return;
         this.remote = saved;
+        this.items = cloneList(saved);
+        showError(this.addError, '');
         this.dirty = false;
         this.conflict = false;
         toast('انحفظت القائمة. الشاشات راح تتحدث خلال ثواني.', 'ok');
@@ -2755,13 +2775,13 @@
     ctx.restore();
   }
 
-  function paintFrame(canvas, withGuide) {
+  function paintFrame(canvas, withGuide, artwork = frame) {
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = frame.color;
+    ctx.fillStyle = artwork.color;
     ctx.fillRect(0, 0, FRAME_W, FRAME_H);
-    if (frame.background) drawFit(ctx, frame.background, 0, 0, FRAME_W, FRAME_H, 'cover');
-    if (frame.left) drawFit(ctx, frame.left, 0, 0, FRAME_SIDE, FRAME_H, frame.fit);
-    if (frame.right) drawFit(ctx, frame.right, FRAME_W - FRAME_SIDE, 0, FRAME_SIDE, FRAME_H, frame.fit);
+    if (artwork.background) drawFit(ctx, artwork.background, 0, 0, FRAME_W, FRAME_H, 'cover');
+    if (artwork.left) drawFit(ctx, artwork.left, 0, 0, FRAME_SIDE, FRAME_H, artwork.fit);
+    if (artwork.right) drawFit(ctx, artwork.right, FRAME_W - FRAME_SIDE, 0, FRAME_SIDE, FRAME_H, artwork.fit);
     if (!withGuide) return;
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fillRect(FRAME_SIDE, 0, FRAME_W - 2 * FRAME_SIDE, FRAME_H);
@@ -2785,6 +2805,24 @@
       img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('ما كدرت أقرا الصورة. جرّب JPEG أو PNG.')); };
       img.src = url;
     });
+  }
+
+  async function composePlaylistFrame(entry, progress) {
+    const load = (url) => !url ? Promise.resolve(null) : new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      const timer = setTimeout(() => { img.src = ''; reject(new Error('تأخر تحميل صورة الإطار. اختَر صورة مرفوعة بالمكتبة.')); }, 20000);
+      img.onload = () => { clearTimeout(timer); resolve(img); };
+      img.onerror = () => { clearTimeout(timer); reject(new Error('ما كدرت أحمل صورة الإطار. اختَر صورة من المكتبة؛ الروابط الخارجية لازم تسمح بقراءة الصورة.')); };
+      img.src = url;
+    });
+    progress(`جاري تجهيز إطار «${entry.name}»…`);
+    const [left, right] = await Promise.all([load(entry.frame_left_url), load(entry.frame_right_url)]);
+    const out = el('canvas', { width: String(FRAME_W), height: String(FRAME_H) });
+    paintFrame(out, false, { left, right, background: null, color: '#000000', fit: 'cover' });
+    const blob = await new Promise((resolve) => out.toBlob(resolve, 'image/jpeg', 0.9));
+    if (!blob) throw new Error('ما كدرت أجهّز صورة الإطار.');
+    return githubPublish(`frames/${newId()}.jpg`, blob, progress);
   }
 
   function renderFrameCurrent() {
