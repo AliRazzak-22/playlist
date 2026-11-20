@@ -1,4 +1,4 @@
-const CACHE = 'signage-admin-v6';
+const CACHE = 'signage-admin-v7';
 const SHELL = ['./', 'index.html', 'app.js', 'style.css', 'icon-192.png', 'icon-512.png', 'manifest.webmanifest'];
 const SHELL_URLS = new Set(SHELL.map((p) => new URL(p, self.registration.scope).href));
 

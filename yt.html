@@ -47,7 +47,10 @@
     if (!player || !player.getCurrentTime || !player.getPlayerState) return;
     if (player.getPlayerState() !== 1) { resetClock(); return; }
     var raw = (player.getCurrentTime() || 0) * 1000, now = performance.now();
-    if (raw === lastRaw) return;
+    if (raw === lastRaw) {
+      if (offsets.length && now - offsets[offsets.length - 1].at > 500) offsets = [];
+      return;
+    }
     lastRaw = raw;
     var off = raw - now;
     if (offsets.length && Math.abs(off - best()) > 250) offsets = [];

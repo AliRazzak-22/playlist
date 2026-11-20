@@ -238,6 +238,7 @@
       fade_out_ms: Math.max(0, num(raw.fade_out_ms) || 0),
       fit: raw.fit === 'cover' ? 'cover' : 'contain',
       frame_url: str(raw.frame_url).trim().slice(0, MAX_URL_LENGTH),
+      volume: Math.min(1, Math.max(0, num(raw.volume) ?? 1)),
     };
   }
 
@@ -267,6 +268,7 @@
       && ['duration_ms', 'fade_in_ms', 'fade_out_ms'].every((key) => Number.isSafeInteger(entry[key]) && entry[key] >= 0)
       && entry.fade_in_ms <= 5000 && entry.fade_out_ms <= 5000
       && entry.fade_in_ms + entry.fade_out_ms <= entry.duration_ms
+      && Number.isFinite(entry.volume) && entry.volume >= 0 && entry.volume <= 1
       && (!entry.frame_url || isHttpsUrl(entry.frame_url))
       && (entry.kind === 'video' || (entry.duration_ms >= 1000 && entry.duration_ms <= 86400000))
       && (entry.kind !== 'youtube' || !!youtubeId(entry.url));
@@ -908,6 +910,26 @@
   function activeSpotlight(o) {
     return o && (o.kind === 'youtube' || o.kind === 'live' || o.kind === 'screen') && str(o.url)
       && num(o.started_at) != null && o.ended_at !== o.started_at ? o : null;
+  }
+
+  const DEVICE_ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
+  const SCREEN_ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
+
+  function preferHardwareCodec(transceiver) {
+    const codecs = RTCRtpSender.getCapabilities?.('video')?.codecs;
+    if (!codecs || !transceiver.setCodecPreferences) return;
+    const preferred = codecs.filter((codec) => /video\/H264/i.test(codec.mimeType));
+    if (preferred.length) {
+      try { transceiver.setCodecPreferences([...preferred, ...codecs.filter((codec) => !preferred.includes(codec))]); } catch (e) {}
+    }
+  }
+
+  async function tuneScreenSender(sender) {
+    const parameters = sender.getParameters();
+    if (!parameters.encodings?.length) return;
+    parameters.encodings[0].maxBitrate = 2500000;
+    parameters.encodings[0].maxFramerate = 30;
+    try { await sender.setParameters(parameters); } catch (e) {}
   }
 
   function waitIceComplete(conn) {
@@ -2107,6 +2129,12 @@
           fields.push(el('label', { class: 'field' }, el('span', { text: label }), input));
         }
       }
+      if (entry.kind !== 'image') {
+        const level = el('output', { text: `${Math.round(entry.volume * 100)}%` });
+        const input = el('input', { type: 'range', min: '0', max: '100', step: '1', value: Math.round(entry.volume * 100), 'aria-label': `صوت ${entry.name}` });
+        input.addEventListener('input', () => { entry.volume = Number(input.value) / 100; level.textContent = `${input.value}%`; this.changed(true); });
+        fields.push(el('label', { class: 'field' }, el('span', { text: 'صوت هذا الفيديو' }), input, level));
+      }
       if (entry.kind === 'video') fields.push(this.frameField(entry));
       return el('div', { class: 'media-settings' }, fields);
     }
@@ -2114,12 +2142,16 @@
     frameField(entry) {
       const input = el('input', { type: 'url', dir: 'ltr', placeholder: 'https://…/frame.jpg', value: entry.frame_url || '', 'aria-label': `إطار ${entry.name}` });
       const thumb = el('img', { class: 'frame-thumb', alt: '' });
-      const preview = el('div', { class: 'frame-pick-preview', hidden: true }, thumb);
+      const name = el('span', { class: 'muted-text' });
+      const preview = el('div', { class: 'frame-pick-preview', hidden: true }, thumb, name);
       const sync = () => {
         const url = input.value.trim();
         preview.hidden = !url;
-        if (url) { thumb.src = url; thumb.onerror = () => { preview.hidden = true; }; }
+        name.textContent = url ? (libraryAssets().find((asset) => asset.url === url)?.name || fileName(url) || 'إطار مخصص') : '';
+        if (isHttpsUrl(url)) { thumb.src = url; thumb.onerror = () => { thumb.hidden = true; }; thumb.hidden = false; }
+        else { thumb.removeAttribute('src'); thumb.hidden = true; }
       };
+      sync();
       input.addEventListener('input', () => { entry.frame_url = input.value.trim(); sync(); this.changed(true); });
       return el('div', { class: 'frame-field' },
         el('span', { text: 'إطار مخصص للفيديو (اختياري)' }),
@@ -2400,43 +2432,92 @@
         return;
       }
       this.teardownSender();
-      const pc = new RTCPeerConnection({ iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] });
-      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-      this.sender = { pc, stream, session, answerListener: null };
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) videoTrack.onended = () => { this.stop(); };
-      try {
-        await pc.setLocalDescription(await pc.createOffer());
-        await waitIceComplete(pc);
-        const sdp = pc.localDescription ? pc.localDescription.sdp : '';
-        if (!sdp) throw new Error('no-sdp');
-        await db.ref(`screen_signal/${session}`).set({ offer: sdp });
-      } catch (e) {
-        this.teardownSender();
-        showError(this.error, 'فشل تجهيز البث. جرّب مرة ثانية.');
-        return;
-      }
-      this.sender.answerListener = db.ref(`screen_signal/${session}/answer`).on('child_added', (snap) => {
-        const sdp = snap.val();
-        if (typeof sdp === 'string' && this.sender && this.sender.pc) {
-          this.sender.pc.setRemoteDescription({ type: 'answer', sdp }).catch(() => {});
-        }
-      });
+      const track = stream.getVideoTracks()[0];
+      try { track.contentHint = 'motion'; } catch (e) {}
+      const base = db.ref(`screen_signal/${session}`);
+      // One peer connection per screen: a WebRTC offer can only ever be answered by a single peer.
+      const sender = { stream, session, base, peers: new Map(), states: {}, listeners: [], live: false, heartbeat: null };
+      this.sender = sender;
+      track.onended = () => { if (this.sender === sender) this.endScreenShare(); };
+      const connect = async (deviceId, request) => {
+        if (this.sender !== sender || !DEVICE_ID_RE.test(deviceId) || !Number.isSafeInteger(request)) return;
+        const old = sender.peers.get(deviceId);
+        if (old && old.n === request) return;
+        if (old) { try { old.pc.close(); } catch (e) {} }
+        const pc = new RTCPeerConnection({ iceServers: SCREEN_ICE_SERVERS });
+        const peer = { pc, n: request };
+        sender.peers.set(deviceId, peer);
+        const transceiver = pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
+        preferHardwareCodec(transceiver);
+        try {
+          await pc.setLocalDescription(await pc.createOffer());
+          await waitIceComplete(pc);
+          if (this.sender !== sender || sender.peers.get(deviceId) !== peer || !pc.localDescription) return;
+          tuneScreenSender(transceiver.sender);
+          await base.child(`offer/${deviceId}`).set({ n: request, sdp: pc.localDescription.sdp });
+        } catch (e) {}
+      };
+      const onAnswer = (snap) => {
+        const v = snap.val();
+        const peer = sender.peers.get(snap.key);
+        if (this.sender !== sender || !peer || !v || v.n !== peer.n || typeof v.sdp !== 'string'
+          || peer.pc.signalingState !== 'have-local-offer') return;
+        peer.pc.setRemoteDescription({ type: 'answer', sdp: v.sdp }).catch(() => {});
+      };
+      const onJoin = (snap) => { connect(snap.key, snap.val()); };
+      const onState = (snap) => { sender.states = snap.val() || {}; this.render(); };
+      const listen = (path, event, fn) => { base.child(path).on(event, fn); sender.listeners.push([path, event, fn]); };
+      listen('join', 'child_added', onJoin);
+      listen('join', 'child_changed', onJoin);
+      listen('answer', 'child_added', onAnswer);
+      listen('answer', 'child_changed', onAnswer);
+      listen('state', 'value', onState);
       const payload = { kind: 'screen', url: `${PAGES_BASE}screen.html?s=${session}`, name: 'مشاركة شاشة',
         loop: false, started_at: Math.round(serverNow() + 5000), position_ms: 0 };
       const expected = state.override ? { ...state.override } : null;
-      const ok = await this.writeTransport(expected, () => payload, 'تجدولت مشاركة الشاشة بعد 5 ثواني.');
-      if (!ok) this.teardownSender();
+      const ok = await this.writeTransport(expected, () => payload, 'بدت مشاركة الشاشة. خلي هاي الصفحة مفتوحة طول البث.');
+      if (!ok || this.sender !== sender) { if (this.sender === sender) this.teardownSender(); return; }
+      sender.live = true;
+      sender.heartbeat = setInterval(() => {
+        if (this.sender === sender && track.readyState === 'ended') this.endScreenShare();
+      }, 2000);
+      try {
+        await managerWrite(() => base.onDisconnect().remove());
+      } catch (e) {
+        toast('انتبه: إذا انقطع نت اللابتوب لازم توقف العرض بيدك.', 'bad');
+      }
+    }
+
+    ownsOverride(o) {
+      return !!(this.sender && o && o.kind === 'screen' && typeof o.url === 'string'
+        && o.url.endsWith(`screen.html?s=${this.sender.session}`));
+    }
+
+    async endScreenShare() {
+      const sender = this.sender;
+      if (!sender) return;
+      try {
+        await managerWrite(() => db.ref('override').transaction((current) => (
+          current && current.kind === 'screen' && typeof current.url === 'string'
+            && current.url.endsWith(`screen.html?s=${sender.session}`) ? null : undefined), undefined, false));
+        toast('وقفت مشاركة الشاشة ورجعت الشاشات للقائمة.', 'ok');
+      } catch (e) {
+        toast(errorText(e), 'bad');
+      }
+      if (this.sender === sender) this.teardownSender();
     }
 
     teardownSender() {
       if (!this.sender) return;
-      const { pc, stream, session, answerListener } = this.sender;
+      const { stream, base, peers, listeners, heartbeat } = this.sender;
       this.sender = null;
-      if (answerListener) db.ref(`screen_signal/${session}/answer`).off('child_added', answerListener);
-      try { pc.close(); } catch (e) {}
+      clearInterval(heartbeat);
+      for (const [path, event, fn] of listeners) base.child(path).off(event, fn);
+      for (const peer of peers.values()) { try { peer.pc.close(); } catch (e) {} }
       if (stream) stream.getTracks().forEach((track) => track.stop());
-      db.ref(`screen_signal/${session}`).remove().catch(() => {});
+      base.onDisconnect().cancel().catch(() => {});
+      base.remove().catch(() => {});
+      this.render();
     }
 
     async transport(action) {
@@ -2479,6 +2560,7 @@
 
     render() {
       const o = this.active();
+      if (this.sender?.live && !this.ownsOverride(o)) { this.teardownSender(); return; }
       this.showButton.disabled = this.saving || !state.loaded.has('override');
       for (const control of [this.stopButton, this.pauseButton, this.restartButton, this.resyncButton]) {
         control.disabled = this.saving || !o || (o?.kind === 'screen' && control !== this.stopButton);
@@ -2510,7 +2592,9 @@
         el('span', { class: 'muted-text', text: hint }));
       this.timing.textContent = isScreen ? transportTiming(o.started_at, num(o.paused_at), now)
         : `${transportTiming(o.started_at, num(o.paused_at), now)} · موضع الساعة المشتركة ${clock(spotlightPosition(o, now))}${o.loop ? ' (زمن تراكمي للتكرار، مو مدة الفيديو)' : ''}`;
-      this.drift.textContent = measuredDriftSummary(o);
+      this.drift.textContent = isScreen && this.sender
+        ? `الشاشات المتصلة بالصورة: ${Object.values(this.sender.states).filter((value) => value === 'playing').length} · إذا ما ظهرت الصورة، تأكد أن الأجهزة على نفس الشبكة.`
+        : measuredDriftSummary(o);
     }
   }
 

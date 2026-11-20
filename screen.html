@@ -5,136 +5,133 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>مشاركة الشاشة</title>
   <style>
-    :root { color-scheme: dark; }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-    body { font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif; color: #fff; }
-    #video {
-      position: fixed; inset: 0; width: 100%; height: 100%;
-      object-fit: contain; background: #000;
-    }
-    #overlay {
-      position: fixed; inset: 0; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 12px; text-align: center;
-      padding: 24px; pointer-events: none; transition: opacity .4s ease;
-    }
-    #overlay.hidden { opacity: 0; }
-    .spinner {
-      width: 42px; height: 42px; border-radius: 50%;
-      border: 4px solid rgba(255,255,255,.2); border-top-color: #fff;
-      animation: spin 1s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #status { font-size: 18px; font-weight: 600; }
-    #detail { font-size: 13px; opacity: .7; max-width: 80vw; }
+    body { font-family: system-ui, sans-serif; color: #fff; }
+    video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+    #overlay { position: fixed; inset: 0; display: grid; place-content: center; text-align: center; padding: 24px; background: #000; }
+    #overlay.hidden { display: none; }
+    #detail { font-size: 14px; opacity: .7; }
   </style>
 </head>
 <body>
   <video id="video" autoplay playsinline muted></video>
-  <div id="overlay">
-    <div class="spinner" aria-hidden="true"></div>
-    <div id="status">جاري الاتصال بالبث…</div>
-    <div id="detail"></div>
-  </div>
-
+  <div id="overlay"><h3 id="status">جاري الاتصال بالبث…</h3><div id="detail"></div></div>
   <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-database-compat.js"></script>
   <script>
   (() => {
     'use strict';
     const params = new URLSearchParams(location.search);
-    const session = (params.get('s') || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
-    const deviceId = (params.get('d') || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+    const session = params.get('s') || '';
+    const deviceId = params.get('d') || '';
     const status = document.getElementById('status');
     const detail = document.getElementById('detail');
     const overlay = document.getElementById('overlay');
     const video = document.getElementById('video');
-
-    function say(text, extra) {
-      status.textContent = text;
-      detail.textContent = extra || '';
+    function say(text, extra = '') { status.textContent = text; detail.textContent = extra; }
+    if (!/^[A-Za-z0-9_-]{8,64}$/.test(session) || !/^[A-Za-z0-9_-]{6,64}$/.test(deviceId)) {
+      say('رابط البث ناقص'); return;
     }
-
-    if (!session || !deviceId) {
-      say('رابط البث ناقص', 'لازم يتوفر معرّف الجلسة ومعرّف الشاشة.');
-      return;
-    }
-
-    const FIREBASE_CONFIG = {
+    if (!window.RTCPeerConnection || !window.firebase) { say('حدّث Android System WebView حتى يشتغل البث'); return; }
+    firebase.initializeApp({
       apiKey: 'AIzaSyACHSjXB-UVG418YSsyedNPV48QbIB9OWA',
       authDomain: 'send-files-to-tv-d371a.firebaseapp.com',
       databaseURL: 'https://send-files-to-tv-d371a-default-rtdb.firebaseio.com',
       projectId: 'send-files-to-tv-d371a',
-    };
-    const ICE_SERVERS = [
-      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-    ];
-
-    firebase.initializeApp(FIREBASE_CONFIG);
-    const db = firebase.database();
-    const offerRef = db.ref(`screen_signal/${session}/offer`);
-    const answerRef = db.ref(`screen_signal/${session}/answer/${deviceId}`);
-
-    let pc = null;
-    let answering = false;
-    let lastOffer = null;
-
+    });
+    const base = firebase.database().ref(`screen_signal/${session}`);
+    let pc = null, request = 0, retry = null, watchdog = null, closed = false;
+    let lastOffer = '', lastFrameAt = 0, startedAt = Date.now(), stopped = false, seenSession = false;
+    window.screenShareState = () => stopped ? 'stopped' : (lastFrameAt && Date.now() - lastFrameAt < 15000 ? 'playing' : 'connecting');
+    base.on('value', (snap) => {
+      if (snap.exists()) seenSession = true;
+      else if (seenSession) { stopped = true; closed = true; clearTimeout(retry); closePeer(); say('انتهى البث'); }
+    });
+    function report(value) { base.child(`state/${deviceId}`).set(value).catch(() => {}); }
     function closePeer() {
-      if (pc) { try { pc.close(); } catch (e) {} pc = null; }
+      clearTimeout(watchdog);
+      if (pc) pc.close();
+      pc = null;
+      lastOffer = '';
+      video.srcObject = null;
     }
-
-    function waitIceComplete(conn) {
+    function reconnect() {
+      if (closed || retry) return;
+      overlay.classList.remove('hidden');
+      say('جاري إعادة الاتصال…', 'تأكد أن اللابتوب والشاشات على نفس الشبكة.');
+      report('connecting');
+      closePeer();
+      retry = setTimeout(() => { retry = null; join(); }, 2000);
+    }
+    function join() {
+      if (closed) return;
+      request = Math.max(Date.now(), request + 1);
+      base.child(`join/${deviceId}`).set(request).catch((e) => { say('فشل طلب البث', e.message); });
+      report('connecting');
+      clearTimeout(watchdog);
+      watchdog = setTimeout(reconnect, 20000);
+    }
+    function waitIce(conn) {
       if (conn.iceGatheringState === 'complete') return Promise.resolve();
       return new Promise((resolve) => {
-        const timer = setTimeout(resolve, 4000);
-        conn.addEventListener('icegatheringstatechange', () => {
-          if (conn.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
-        }, { once: false });
+        const done = () => { clearTimeout(timer); conn.removeEventListener('icegatheringstatechange', changed); resolve(); };
+        const changed = () => { if (conn.iceGatheringState === 'complete') done(); };
+        const timer = setTimeout(done, 8000);
+        conn.addEventListener('icegatheringstatechange', changed);
       });
     }
-
-    async function answer(offerSdp) {
-      if (!offerSdp || offerSdp === lastOffer) return;
-      lastOffer = offerSdp;
+    async function answer(value) {
+      if (closed || !value || value.n !== request || typeof value.sdp !== 'string' || value.sdp === lastOffer) return;
+      seenSession = true;
       closePeer();
-      answering = true;
-      say('تم استلام البث، جاري الربط…', '');
-      const conn = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      lastOffer = value.sdp;
+      const conn = new RTCPeerConnection({ iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] });
       pc = conn;
-      conn.onicecandidate = () => {};
+      watchdog = setTimeout(reconnect, 20000);
       conn.oniceconnectionstatechange = () => {
-        const s = conn.iceConnectionState;
-        if (s === 'connected' || s === 'completed') {
-          overlay.classList.add('hidden');
-          say('متصل', '');
-        } else if (s === 'failed' || s === 'disconnected') {
-          overlay.classList.remove('hidden');
-          say('انقطع الاتصال، جاري إعادة الربط…', '');
-        }
+        if (pc !== conn) return;
+        if (['failed', 'disconnected'].includes(conn.iceConnectionState)) reconnect();
       };
       conn.ontrack = (event) => {
+        if (pc !== conn) return;
+        const receiver = event.receiver;
+        try { if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 500; } catch (e) {}
+        try { if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = .5; } catch (e) {}
         video.srcObject = event.streams[0] || new MediaStream([event.track]);
-        overlay.classList.add('hidden');
-        say('متصل', '');
+        video.play().catch(() => { say('فشل تشغيل الصورة'); reconnect(); });
       };
       try {
-        await conn.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+        await conn.setRemoteDescription({ type: 'offer', sdp: value.sdp });
         await conn.setLocalDescription(await conn.createAnswer());
-        await waitIceComplete(conn);
-        const sdp = conn.localDescription ? conn.localDescription.sdp : '';
-        if (sdp) await answerRef.set(sdp);
-        say('تم الربط، بانتظار الصورة…', '');
+        await waitIce(conn);
+        if (pc !== conn || closed) return;
+        await base.child(`answer/${deviceId}`).set({ n: value.n, sdp: conn.localDescription.sdp });
+        say('تم الربط، بانتظار الصورة…');
       } catch (e) {
-        say('فشل الربط', String(e && e.message || e).slice(0, 120));
-      } finally {
-        answering = false;
+        if (pc === conn) { say('فشل الربط', String(e.message).slice(0, 120)); reconnect(); }
       }
     }
-
-    offerRef.on('value', (snap) => {
-      const val = snap.val();
-      if (typeof val === 'string') answer(val);
-      else if (!answering) say('ماكو بث نشط هسه', 'انتظر حتى يبدأ العرض من لوحة الإدارة.');
+    video.onplaying = () => {
+      clearTimeout(watchdog);
+      overlay.classList.add('hidden');
+      lastFrameAt = Date.now();
+      report('playing');
+    };
+    video.ontimeupdate = () => { if (!video.paused && !video.requestVideoFrameCallback) lastFrameAt = Date.now(); };
+    if (video.requestVideoFrameCallback) {
+      const frame = () => { lastFrameAt = Date.now(); if (!closed) video.requestVideoFrameCallback(frame); };
+      video.requestVideoFrameCallback(frame);
+    }
+    const monitor = setInterval(() => {
+      if (!closed && Date.now() - (lastFrameAt || startedAt) > 60000) {
+        stopped = true; closed = true; clearTimeout(retry); closePeer(); say('تعذر الاتصال بالبث'); report('connecting');
+      } else if (!closed && pc && video.requestVideoFrameCallback && lastFrameAt && Date.now() - lastFrameAt > 15000) reconnect();
+    }, 5000);
+    base.child(`offer/${deviceId}`).on('value', (snap) => answer(snap.val()), (e) => say('فشل الاتصال', e.message));
+    join();
+    window.addEventListener('pagehide', () => {
+      closed = true; clearTimeout(retry); clearInterval(monitor); closePeer(); base.off();
     });
   })();
   </script>
