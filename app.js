@@ -2684,6 +2684,32 @@
   const cfgDisplay = $('cfg-display');
   const cfgQuality = $('cfg-quality');
   let configDirty = false;
+  const cfgInfoToggle = $('cfg-info-toggle');
+  let infoToggleSaving = false;
+
+  function renderInfoToggle() {
+    const shown = state.config?.show_info_overlay === true;
+    cfgInfoToggle.textContent = infoToggleSaving ? 'جاري التغيير…' : shown ? 'إخفاء معلومات الشاشة' : 'إظهار معلومات الشاشة';
+    cfgInfoToggle.setAttribute('aria-pressed', String(shown));
+    cfgInfoToggle.disabled = infoToggleSaving || !pinUnlocked || !state.loaded.has('config');
+  }
+
+  cfgInfoToggle.addEventListener('click', async () => {
+    if (infoToggleSaving || !pinUnlocked || !state.loaded.has('config')) return;
+    const epoch = sessionEpoch;
+    const shown = state.config?.show_info_overlay !== true;
+    infoToggleSaving = true;
+    renderInfoToggle();
+    try {
+      await managerWrite(() => db.ref('config/show_info_overlay').set(shown));
+      if (epoch === sessionEpoch) toast(shown ? 'ظهرت معلومات الشاشة.' : 'اختفت معلومات الشاشة.', 'ok');
+    } catch (e) {
+      if (epoch === sessionEpoch) toast(errorText(e), 'bad');
+    } finally {
+      infoToggleSaving = false;
+      renderInfoToggle();
+    }
+  });
 
   function currentConfig() {
     const c = state.config || {};
@@ -2700,6 +2726,7 @@
   }
 
   function fillConfigForm(force) {
+    renderInfoToggle();
     if (configDirty && !force) {
       $('config-state').textContent = 'الإعدادات تغيّرت من مكان ثاني. إذا تحفظ، تعديلك يكتب فوقها.';
       return;
