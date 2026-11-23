@@ -90,6 +90,7 @@
     plus: '<path d="M12 5v14M5 12h14"/>',
     copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h9"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  sliders: '<path d="M4 7h7m4 0h5M4 17h3m4 0h9"/><circle cx="13" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
   };
 
   function icon(name) {
@@ -411,6 +412,7 @@
     serverOffset: 0,
     devices: {},
     names: {},
+    offsets: {},
     devicePlaylists: {},
     playlist: [],
     override: null,
@@ -511,10 +513,13 @@
       renderQueued = false;
       if (!pinUnlocked) return;
       if (Date.now() >= sessionDeadline) { stopApp('انتهت جلسة الثماني ساعات. أدخل الرمز مرة ثانية.'); return; }
-      renderDevices();
-      renderUpdateTab();
-      renderSync();
-      spotlightPanel.render();
+      const tab = location.hash.slice(1);
+      globalEditor.tick();
+      state.deviceEditor?.editor.tick();
+      if (tab === 'screens') renderDevices();
+      if (tab === 'update') renderUpdateTab();
+      if (tab === 'control') renderSync();
+      if (tab === 'playlist' || tab === 'control') spotlightPanel.render();
     });
   }
 
@@ -581,9 +586,11 @@
   function layoutCarousel() {
     const n = carousel.panels.length;
     const P = carousel.P;
+    carousel.viewport.classList.toggle('carousel-moving', !!carousel.spring || !!carousel.drag);
     carousel.panels.forEach((p, i) => {
       const d = i - P;
-      p.style.transform = `translate3d(${(-d * carousel.W).toFixed(2)}px,0,0)`;
+      p.style.willChange = carousel.spring || carousel.drag ? 'transform' : 'auto';
+      p.style.transform = Math.abs(d) < 0.0005 ? 'none' : `translate3d(${(-d * carousel.W).toFixed(2)}px,0,0)`;
       p.style.visibility = Math.abs(d) <= 1.001 ? 'visible' : 'hidden';
     });
     const c = clamp(P, 0, n - 1);
@@ -644,6 +651,7 @@
   }
 
   function kickCarousel() {
+    carousel.viewport.classList.add('carousel-moving');
     if (!carousel.raf) carousel.raf = requestAnimationFrame(carouselFrame);
   }
 
@@ -779,6 +787,7 @@
     markTab(i);
     if (!carousel.ready) initCarousel();
     springTo(i);
+    scheduleRender();
   }
 
   carousel.buttons.forEach((btn) => {
@@ -917,6 +926,26 @@
   const DEVICE_ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
   const SCREEN_ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
 
+  function screenCaptureConstraints(resolution) {
+    const size = resolution === '1080p' ? [1920, 1080]
+      : resolution === '720p' ? [1280, 720]
+      : resolution === '480p' ? [854, 480] : [1920, 1080];
+    return {
+      video: { width: { ideal: size[0] }, height: { ideal: size[1] }, frameRate: { ideal: 30, max: 30 } },
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+        channelCount: { ideal: 2 }, sampleRate: { ideal: 48000 } },
+    };
+  }
+
+  function screenReceiverUrl(session, startedAt) {
+    return `${PAGES_BASE}screen.html?s=${encodeURIComponent(session)}&t=${startedAt}`;
+  }
+
+  function screenVideoBitrate(resolution) {
+    return resolution === '1080p' ? 5000000 : resolution === '720p' ? 2800000
+      : resolution === '480p' ? 1500000 : 4000000;
+  }
+
   function preferHardwareCodec(transceiver) {
     const codecs = RTCRtpSender.getCapabilities?.('video')?.codecs;
     if (!codecs || !transceiver.setCodecPreferences) return;
@@ -926,10 +955,10 @@
     }
   }
 
-  async function tuneScreenSender(sender) {
+  async function tuneScreenSender(sender, maxBitrate) {
     const parameters = sender.getParameters();
     if (!parameters.encodings?.length) return;
-    parameters.encodings[0].maxBitrate = 2500000;
+    parameters.encodings[0].maxBitrate = maxBitrate;
     parameters.encodings[0].maxFramerate = 30;
     try { await sender.setParameters(parameters); } catch (e) {}
   }
@@ -1603,6 +1632,13 @@
     }).filter(Boolean).sort((a, b) => b.created_at - a.created_at || a.name.localeCompare(b.name, 'ar'));
   }
 
+  function libraryAssetName(url) {
+    for (const raw of Object.values(state.library)) {
+      if (raw && raw.url === url) return str(raw.name) || fileName(url);
+    }
+    return fileName(url);
+  }
+
   function assetCard(asset, onSelect, selectLabel, onDelete = null) {
     return el('article', { class: 'library-asset' },
       pill(asset.kind === 'image' ? 'صورة' : 'فيديو', 'muted'),
@@ -2031,6 +2067,25 @@
     dialog.showModal();
   }
 
+  class PlaylistAutoSave {
+    constructor(delayMs, onSave) {
+      this.delayMs = delayMs;
+      this.onSave = onSave;
+      this.dueAt = 0;
+    }
+
+    reset() { this.dueAt = Date.now() + this.delayMs; }
+    cancel() { this.dueAt = 0; }
+
+    tick(now = Date.now()) {
+      if (!this.dueAt || now < this.dueAt) return;
+      this.dueAt = 0;
+      this.onSave();
+    }
+
+    get remainingMs() { return this.dueAt ? Math.max(0, this.dueAt - Date.now()) : 0; }
+  }
+
   class PlaylistEditor {
     constructor({ onSave, emptyText, extraActions = () => [], confirmEmpty = null }) {
       this.onSave = onSave;
@@ -2042,6 +2097,10 @@
       this.dirty = false;
       this.conflict = false;
       this.saving = false;
+      this.openSettings = new Set();
+      this.autoSaveError = '';
+      this.autoStatus = null;
+      this.autoSave = new PlaylistAutoSave(3000, () => this.save(true));
 
       this.libraryButton = button('اختيار فيديو أو صورة من المكتبة', {
         kind: 'primary', iconName: 'plus', onClick: () => chooseLibrary(this),
@@ -2052,7 +2111,7 @@
       this.footer = el('div', { class: 'pl-footer' });
       this.root = el('div', { class: 'pl-editor' },
         el('div', { class: 'pl-add' }, this.libraryButton,
-          el('span', { class: 'muted-text', text: 'ارفع الملفات من تبويب مكتبة الوسائط. اليوتيوب والبث المباشر من بطاقة العرض الفوري فوق.' })),
+          el('span', { class: 'muted-text', text: 'ارفع الملفات من تبويب مكتبة الوسائط. اليوتيوب والبث المباشر من بطاقة العرض الفوري فوق. التعديلات الصحيحة تنطبق تلقائياً بعد 3 ثوانٍ.' })),
         this.addError, this.notice, this.list, this.footer);
       this.render();
     }
@@ -2069,6 +2128,7 @@
       } else {
         this.conflict = true;
       }
+      this.refreshAutoSave();
       this.render(this.dirty);
     }
 
@@ -2080,13 +2140,42 @@
     changed(preserveList = false) {
       this.dirty = !sameList(this.items, this.remote);
       if (!this.dirty) this.conflict = false;
+      this.autoSaveError = '';
+      this.refreshAutoSave();
       this.render(preserveList);
+    }
+
+    refreshAutoSave() {
+      this.autoSave.cancel();
+      if (this.dirty && !this.saving && !this.conflict && this.items.length && this.items.every(validEntry)) {
+        this.autoSave.reset();
+      }
+    }
+
+    tick() {
+      this.autoSave.tick();
+      this.updateAutoStatus();
+    }
+
+    updateAutoStatus() {
+      if (!this.autoStatus) return;
+      let text = '';
+      if (this.saving) text = 'جاري تطبيق التغييرات…';
+      else if (this.autoSaveError) text = this.autoSaveError;
+      else if (this.dirty && this.conflict) text = 'الحفظ التلقائي متوقف بسبب تعارض التعديل.';
+      else if (this.dirty && !this.items.length) text = 'القائمة الفاضية ما تنحفظ تلقائياً؛ استخدم زر الحفظ.';
+      else if (this.dirty && !this.items.every(validEntry)) text = 'صحّح الحقول ليشتغل الحفظ التلقائي.';
+      else if (this.dirty) text = `تطبيق تلقائي خلال ${Math.max(1, Math.ceil(this.autoSave.remainingMs / 1000))} ثانية`;
+      if (this.autoStatus.textContent !== text) this.autoStatus.textContent = text;
     }
 
     discard() {
       this.items = cloneList(this.remote);
       this.dirty = false;
       this.conflict = false;
+      this.autoSaveError = '';
+      this.autoSave.cancel();
+      this.openSettings.clear();
       showError(this.addError, '');
       this.render();
     }
@@ -2098,6 +2187,37 @@
       entry.id = newId();
       this.items.push(entry);
       this.changed();
+    }
+
+    entrySettings(entry) {
+      const body = el('div', { class: 'pl-item-settings-body' });
+      const details = el('details', { class: 'pl-item-settings' },
+        el('summary', { class: 'btn ghost sm item-settings-toggle' },
+          icon('sliders'),
+          el('span', { text: entry.kind === 'video' ? 'إعدادات الفيديو والإطار' : 'إعدادات العنصر' }),
+          entry.kind === 'video' && (entry.frame_url || entry.frame_left_url || entry.frame_right_url)
+            ? pill('إطار مخصص', 'warn') : null,
+          entry.kind !== 'image' && entry.volume !== 1 ? pill(`صوت ${Math.round(entry.volume * 100)}%`, 'muted') : null),
+        body);
+      let built = false;
+      const build = () => {
+        if (built) return;
+        built = true;
+        body.append(this.settings(entry));
+      };
+      details.open = this.openSettings.has(entry.id);
+      if (details.open) build();
+      details.addEventListener('toggle', () => {
+        if (details.open) {
+          this.openSettings.add(entry.id);
+          build();
+        } else {
+          this.openSettings.delete(entry.id);
+          built = false;
+          body.replaceChildren();
+        }
+      });
+      return details;
     }
 
     settings(entry) {
@@ -2158,7 +2278,7 @@
       const sync = () => {
         const url = input.value.trim();
         preview.hidden = !url;
-        name.textContent = url ? (libraryAssets().find((asset) => asset.url === url)?.name || fileName(url) || 'إطار مخصص') : '';
+        name.textContent = url ? (libraryAssetName(url) || 'إطار مخصص') : '';
         if (isHttpsUrl(url)) { thumb.src = url; thumb.onerror = () => { thumb.hidden = true; }; thumb.hidden = false; }
         else { thumb.removeAttribute('src'); thumb.hidden = true; }
       };
@@ -2212,16 +2332,18 @@
       this.changed();
     }
 
-    async save() {
+    async save(auto = false) {
       if (this.saving || !pinUnlocked) return;
+      this.autoSave.cancel();
+      this.autoSaveError = '';
       const epoch = sessionEpoch;
       const ids = new Set(this.items.map((entry) => entry.id));
       if (this.items.some((entry) => !validEntry(entry)) || ids.size !== this.items.length) {
         showError(this.addError, 'صحّح الوسائط والمدة والتلاشي قبل الحفظ. الروابط لازم تكون HTTPS ومعرّفات العناصر مستقلة.');
         return;
       }
-      if (!this.items.length && this.confirmEmpty && !(await this.confirmEmpty())) return;
-      if (this.conflict && !(await confirmBox({ title: 'القائمة تغيّرت', message: 'تريد تستبدل النسخة السحابية الحالية بتعديلاتك؟', okText: 'استبدل واحفظ' }))) return;
+      if (!this.items.length && (auto || (this.confirmEmpty && !(await this.confirmEmpty())))) return;
+      if (this.conflict && (auto || !(await confirmBox({ title: 'القائمة تغيّرت', message: 'تريد تستبدل النسخة السحابية الحالية بتعديلاتك؟', okText: 'استبدل واحفظ' })))) return;
       if (epoch !== sessionEpoch || !pinUnlocked) return;
       this.saving = true;
       this.root.inert = true;
@@ -2247,7 +2369,10 @@
         this.conflict = false;
         toast('انحفظت القائمة. الشاشات راح تتحدث خلال ثواني.', 'ok');
       } catch (e) {
-        if (epoch === sessionEpoch) toast(errorText(e), 'bad');
+        if (epoch === sessionEpoch) {
+          if (auto) this.autoSaveError = 'تعذر الحفظ التلقائي. راجع الرسالة ثم اضغط حفظ القائمة.';
+          toast(errorText(e), 'bad');
+        }
       } finally {
         if (epoch === sessionEpoch) {
           this.saving = false;
@@ -2280,15 +2405,18 @@
                   button('لفوق', { kind: 'ghost sm', iconName: 'up', iconOnly: true, disabled: i === 0, onClick: () => this.move(i, -1) }),
                   button('لجوة', { kind: 'ghost sm', iconName: 'down', iconOnly: true, disabled: i === last, onClick: () => this.move(i, 1) }),
                   button('حذف', { kind: 'danger sm', iconName: 'trash', iconOnly: true, onClick: () => this.remove(i) }))),
-              this.settings(entry));
+              this.entrySettings(entry));
           })));
         }
       }
 
+      this.autoStatus = el('span', { class: 'auto-save-status' });
       this.footer.replaceChildren(
-        el('div', { class: 'group' },
-          el('span', { class: 'muted-text', text: `${this.items.length} عنصر` }),
-          this.dirty ? el('span', { class: 'dirty-note', text: 'في تغييرات ما محفوظة' }) : null),
+        el('div', { class: 'pl-save-state' },
+          el('div', { class: 'group' },
+            el('span', { class: 'muted-text', text: `${this.items.length} عنصر` }),
+            this.dirty ? el('span', { class: 'dirty-note', text: 'في تغييرات ما محفوظة' }) : null),
+          this.autoStatus),
         el('div', { class: 'group' },
           this.extraActions(),
           this.dirty ? button('تراجع', { kind: 'ghost', disabled: this.saving, onClick: () => this.discard() }) : null,
@@ -2297,6 +2425,7 @@
             disabled: !this.dirty || this.saving,
             onClick: () => this.save(),
           })));
+      this.updateAutoStatus();
     }
   }
 
@@ -2433,14 +2562,10 @@
         return;
       }
       const session = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-6);
+      const resolution = this.resolution.value;
       let stream;
       try {
-        const video = { frameRate: { ideal: 30, max: 30 } };
-        const resolution = this.resolution.value;
-        if (resolution === '1080p') Object.assign(video, { width: 1920, height: 1080 });
-        else if (resolution === '720p') Object.assign(video, { width: 1280, height: 720 });
-        else if (resolution === '480p') Object.assign(video, { width: 854, height: 480 });
-        stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false });
+        stream = await navigator.mediaDevices.getDisplayMedia(screenCaptureConstraints(resolution));
       } catch (e) {
         if (String(e && e.name) !== 'NotAllowedError' && String(e && e.name) !== 'AbortError') {
           showError(this.error, 'ما كدرت أفتح مشاركة الشاشة. استخدم متصفح كروم أو إيدج.');
@@ -2448,12 +2573,19 @@
         return;
       }
       if (!stream || !stream.getVideoTracks().length) {
+        stream?.getTracks().forEach((track) => track.stop());
         showError(this.error, 'ما التقطت صورة من الشاشة. جرّب مرة ثانية.');
+        return;
+      }
+      if (!stream.getAudioTracks().length) {
+        stream.getTracks().forEach((track) => track.stop());
+        showError(this.error, 'المتصفح ما أعطى صوت للبث. من كروم أو إيدج اختار «علامة تبويب Chrome» وفعّل «مشاركة صوت علامة التبويب»، أو شارك صوت النظام من الشاشة كلها.');
         return;
       }
       this.teardownSender();
       const track = stream.getVideoTracks()[0];
-      try { track.contentHint = 'motion'; } catch (e) {}
+      const audioTrack = stream.getAudioTracks()[0];
+      try { track.contentHint = 'detail'; } catch (e) {}
       const base = db.ref(`screen_signal/${session}`);
       // One peer connection per screen: a WebRTC offer can only ever be answered by a single peer.
       const sender = { stream, session, base, peers: new Map(), states: {}, listeners: [], live: false, heartbeat: null };
@@ -2469,11 +2601,12 @@
         sender.peers.set(deviceId, peer);
         const transceiver = pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
         preferHardwareCodec(transceiver);
+        pc.addTransceiver(audioTrack, { direction: 'sendonly', streams: [stream] });
         try {
           await pc.setLocalDescription(await pc.createOffer());
           await waitIceComplete(pc);
           if (this.sender !== sender || sender.peers.get(deviceId) !== peer || !pc.localDescription) return;
-          tuneScreenSender(transceiver.sender);
+          tuneScreenSender(transceiver.sender, screenVideoBitrate(resolution));
           await base.child(`offer/${deviceId}`).set({ n: request, sdp: pc.localDescription.sdp });
         } catch (e) {}
       };
@@ -2492,8 +2625,9 @@
       listen('answer', 'child_added', onAnswer);
       listen('answer', 'child_changed', onAnswer);
       listen('state', 'value', onState);
-      const payload = { kind: 'screen', url: `${PAGES_BASE}screen.html?s=${session}`, name: 'مشاركة شاشة',
-        loop: false, started_at: Math.round(serverNow() + 5000), position_ms: 0 };
+      const startedAt = Math.round(serverNow() + 5000);
+      const payload = { kind: 'screen', url: screenReceiverUrl(session, startedAt), name: 'مشاركة شاشة',
+        loop: false, started_at: startedAt, position_ms: 0 };
       const expected = state.override ? { ...state.override } : null;
       const ok = await this.writeTransport(expected, () => payload, 'بدت مشاركة الشاشة. خلي هاي الصفحة مفتوحة طول البث.');
       if (!ok || this.sender !== sender) { if (this.sender === sender) this.teardownSender(); return; }
@@ -2510,7 +2644,7 @@
 
     ownsOverride(o) {
       return !!(this.sender && o && o.kind === 'screen' && typeof o.url === 'string'
-        && o.url.endsWith(`screen.html?s=${this.sender.session}`));
+        && o.url.includes(`screen.html?s=${this.sender.session}&t=`));
     }
 
     async endScreenShare() {
@@ -2519,7 +2653,7 @@
       try {
         await managerWrite(() => db.ref('override').transaction((current) => (
           current && current.kind === 'screen' && typeof current.url === 'string'
-            && current.url.endsWith(`screen.html?s=${sender.session}`) ? null : undefined), undefined, false));
+            && current.url.includes(`screen.html?s=${sender.session}&t=`) ? null : undefined), undefined, false));
         toast('وقفت مشاركة الشاشة ورجعت الشاشات للقائمة.', 'ok');
       } catch (e) {
         toast(errorText(e), 'bad');
@@ -3211,6 +3345,7 @@
       filter: 'all',
       devices: {},
       names: {},
+      offsets: {},
       devicePlaylists: {},
       playlist: [],
       override: null,

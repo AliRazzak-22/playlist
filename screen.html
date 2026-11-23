@@ -12,11 +12,12 @@
     #overlay { position: fixed; inset: 0; display: grid; place-content: center; text-align: center; padding: 24px; background: #000; }
     #overlay.hidden { display: none; }
     #detail { font-size: 14px; opacity: .7; }
+    #sound-button { margin: 18px auto 0; padding: 12px 20px; border: 0; border-radius: 10px; background: #fff; color: #111; font: inherit; }
   </style>
 </head>
 <body>
-  <video id="video" autoplay playsinline muted></video>
-  <div id="overlay"><h3 id="status">جاري الاتصال بالبث…</h3><div id="detail"></div></div>
+  <video id="video" autoplay playsinline></video>
+  <div id="overlay"><h3 id="status">جاري الاتصال بالبث…</h3><div id="detail"></div><button id="sound-button" type="button" hidden>تفعيل الصوت</button></div>
   <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/13.3.0/firebase-database-compat.js"></script>
   <script>
@@ -29,7 +30,12 @@
     const detail = document.getElementById('detail');
     const overlay = document.getElementById('overlay');
     const video = document.getElementById('video');
+    const soundButton = document.getElementById('sound-button');
+    const scheduled = Number(params.get('t'));
+    const startAt = Number.isSafeInteger(scheduled) && scheduled > 0 ? scheduled : 0;
+    let serverOffset = 0, streamReady = false, startTimer = null;
     function say(text, extra = '') { status.textContent = text; detail.textContent = extra; }
+    function serverNow() { return Date.now() + serverOffset; }
     if (!/^[A-Za-z0-9_-]{8,64}$/.test(session) || !/^[A-Za-z0-9_-]{6,64}$/.test(deviceId)) {
       say('رابط البث ناقص'); return;
     }
@@ -41,6 +47,12 @@
       projectId: 'send-files-to-tv-d371a',
     });
     const base = firebase.database().ref(`screen_signal/${session}`);
+    const offsetRef = firebase.database().ref('.info/serverTimeOffset');
+    offsetRef.on('value', (snap) => {
+      const value = Number(snap.val());
+      serverOffset = Number.isFinite(value) ? value : 0;
+      if (streamReady) armStart();
+    });
     let pc = null, request = 0, retry = null, watchdog = null, closed = false;
     let lastOffer = '', lastFrameAt = 0, startedAt = Date.now(), stopped = false, seenSession = false;
     window.screenShareState = () => stopped ? 'stopped' : (lastFrameAt && Date.now() - lastFrameAt < 15000 ? 'playing' : 'connecting');
@@ -49,8 +61,33 @@
       else if (seenSession) { stopped = true; closed = true; clearTimeout(retry); closePeer(); say('انتهى البث'); }
     });
     function report(value) { base.child(`state/${deviceId}`).set(value).catch(() => {}); }
+    function playStream() {
+      video.muted = false;
+      video.defaultMuted = false;
+      video.volume = 1;
+      video.play().catch((e) => {
+        if (String(e && e.name) === 'NotAllowedError') {
+          soundButton.hidden = false;
+          say('اضغط لتفعيل الصوت');
+        } else reconnect();
+      });
+    }
+    function armStart() {
+      if (closed || !streamReady) return;
+      clearTimeout(startTimer);
+      const wait = startAt ? Math.max(0, startAt - serverNow()) : 0;
+      if (wait > 150) {
+        video.pause();
+        say('البث جاهز، يبدأ مع بقية الشاشات…', `بعد ${Math.ceil(wait / 1000)} ثانية`);
+        startTimer = setTimeout(playStream, wait);
+      } else playStream();
+    }
+    soundButton.addEventListener('click', () => { soundButton.hidden = true; playStream(); });
     function closePeer() {
       clearTimeout(watchdog);
+      clearTimeout(startTimer);
+      streamReady = false;
+      soundButton.hidden = true;
       if (pc) pc.close();
       pc = null;
       lastOffer = '';
@@ -99,7 +136,8 @@
         try { if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 500; } catch (e) {}
         try { if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = .5; } catch (e) {}
         video.srcObject = event.streams[0] || new MediaStream([event.track]);
-        video.play().catch(() => { say('فشل تشغيل الصورة'); reconnect(); });
+        streamReady = true;
+        armStart();
       };
       try {
         await conn.setRemoteDescription({ type: 'offer', sdp: value.sdp });
@@ -114,6 +152,8 @@
     }
     video.onplaying = () => {
       clearTimeout(watchdog);
+      clearTimeout(startTimer);
+      soundButton.hidden = true;
       overlay.classList.add('hidden');
       lastFrameAt = Date.now();
       report('playing');
@@ -131,7 +171,7 @@
     base.child(`offer/${deviceId}`).on('value', (snap) => answer(snap.val()), (e) => say('فشل الاتصال', e.message));
     join();
     window.addEventListener('pagehide', () => {
-      closed = true; clearTimeout(retry); clearInterval(monitor); closePeer(); base.off();
+      closed = true; clearTimeout(retry); clearInterval(monitor); closePeer(); base.off(); offsetRef.off();
     });
   })();
   </script>

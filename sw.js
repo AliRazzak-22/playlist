@@ -1,4 +1,4 @@
-const CACHE = 'signage-admin-v9';
+const CACHE = 'signage-admin-v11';
 const SHELL = ['./', 'index.html', 'app.js', 'style.css', 'icon-192.png', 'icon-512.png', 'manifest.webmanifest'];
 const SHELL_URLS = new Set(SHELL.map((p) => new URL(p, self.registration.scope).href));
 
@@ -20,13 +20,21 @@ self.addEventListener('fetch', (event) => {
   url.hash = '';
   const key = url.href;
   if (!SHELL_URLS.has(key)) return;
-  event.respondWith(fetch(req, { cache: 'no-cache' })
-    .then((res) => {
+  event.respondWith((async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    try {
+      const res = await fetch(req, { cache: 'no-cache', signal: controller.signal });
       if (res.ok) {
         const copy = res.clone();
         caches.open(CACHE).then((cache) => cache.put(key, copy));
       }
       return res;
-    })
-    .catch(() => caches.match(key).then((hit) => hit || Response.error())));
+    } catch {
+      const hit = await caches.match(key);
+      return hit || Response.error();
+    } finally {
+      clearTimeout(timeout);
+    }
+  })());
 });
