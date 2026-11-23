@@ -1388,6 +1388,21 @@
           CLOCK_SOURCES[str(d.clock_source)] ? ` · ${CLOCK_SOURCES[str(d.clock_source)]}` : null));
       }
     }
+    if (d.media_kind === 'youtube') {
+      const quality = str(d.youtube_quality);
+      const buffering = num(d.youtube_buffering_ms);
+      const stalls = num(d.youtube_stalls);
+      const qualityChanges = num(d.youtube_quality_changes);
+      const startLatency = num(d.youtube_start_latency_ms);
+      const values = [];
+      const add = (...parts) => { if (values.length) values.push(' · '); values.push(...parts); };
+      if (quality) add(`الجودة ${quality}`);
+      if (buffering != null && buffering > 0) add('تحميل مؤقت ', ltr(`${Math.round(buffering)} ms`));
+      if (stalls != null && stalls > 0) add('تقطّعات ', ltr(String(Math.round(stalls))));
+      if (qualityChanges != null && qualityChanges > 0) add('خفض الجودة ', ltr(String(Math.round(qualityChanges))));
+      if (startLatency != null) add('تأخير البدء ', ltr(`${Math.round(startLatency)} ms`));
+      if (values.length) body.append(kv('قياسات يوتيوب', ...values));
+    }
     body.append(kv('تعويض التوقيت', v.offset ? ltr(`${v.offset} ms`) : 'بدون'));
     if (v.online && startedAt) {
       body.append(kv('شغّالة من', duration(serverNow() - startedAt)));

@@ -20,6 +20,8 @@
   var player = null, apiReady = false, ready = false, error = 0, live = false;
   var pending = null, startAt = 0, primed = false, volume = 1, quality = '';
   var generation = 0, stateGeneration = null, apiFailed = false;
+  var qualityApplied = '', qualityChanges = 0, lastQualityChangeAt = -Infinity;
+  var bufferStartedAt = null, recentStalls = [], stalls = 0;
 
   function destroyPlayer() {
     var previous = player;
@@ -33,10 +35,64 @@
   }
 
   var QUALITY = { '1080p': 'hd1080', '720p': 'hd720', '480p': 'large', '360p': 'medium', '240p': 'small' };
+  var QUALITY_LADDER = ['hd1080', 'hd720', 'large', 'medium', 'small'];
+  var BUFFER_BACKOFF_MS = 3500, STALL_MS = 700, STALL_WINDOW_MS = 12000, QUALITY_COOLDOWN_MS = 8000;
+
+  function resetPlaybackStats(requestedQuality) {
+    quality = QUALITY[requestedQuality] || requestedQuality || '';
+    qualityApplied = ''; qualityChanges = 0; lastQualityChangeAt = -Infinity;
+    bufferStartedAt = null; recentStalls = []; stalls = 0;
+  }
+
+  function applyQuality(q) {
+    if (!player || !player.setPlaybackQuality || !q || qualityApplied === q) return false;
+    qualityApplied = q;
+    player.setPlaybackQuality(q);
+    return true;
+  }
+
   // Set once: re-forcing on every quality event makes the player switch streams and rebuffer.
-  function lockQuality() {
-    var q = QUALITY[quality];
-    if (q && player && player.setPlaybackQuality) player.setPlaybackQuality(q);
+  function lockQuality() { applyQuality(quality); }
+
+  function effectiveQualityIndex() {
+    var actual = player && player.getPlaybackQuality ? player.getPlaybackQuality() : '';
+    var index = QUALITY_LADDER.indexOf(actual);
+    if (index < 0) index = QUALITY_LADDER.indexOf(quality);
+    if (index < 0 && (actual === 'highres' || quality === 'highres')) return 0;
+    return index;
+  }
+
+  function lowerQuality(now) {
+    if (!player || !player.setPlaybackQuality || now - lastQualityChangeAt < QUALITY_COOLDOWN_MS) return false;
+    var index = effectiveQualityIndex();
+    if (index >= QUALITY_LADDER.length - 1) return false;
+    // Adaptive quality may already be low, so only 240p is a guaranteed downward fallback.
+    var next = index < 0 ? 'small' : QUALITY_LADDER[index + 1];
+    if (next === qualityApplied) return false;
+    quality = next;
+    if (!applyQuality(quality)) return false;
+    qualityChanges++; lastQualityChangeAt = now; recentStalls = [];
+    return true;
+  }
+
+  function monitorBuffering(now) {
+    if (bufferStartedAt != null && now - bufferStartedAt >= BUFFER_BACKOFF_MS && lowerQuality(now)) bufferStartedAt = now;
+  }
+
+  function notePlayerState(next, now) {
+    if (next === 3) {
+      if (bufferStartedAt == null) bufferStartedAt = now;
+      monitorBuffering(now);
+    } else if (bufferStartedAt != null) {
+      var duration = now - bufferStartedAt;
+      bufferStartedAt = null;
+      if (duration >= STALL_MS) {
+        stalls++;
+        recentStalls.push(now);
+        while (recentStalls.length && now - recentStalls[0] > STALL_WINDOW_MS) recentStalls.shift();
+        if (recentStalls.length >= 3) lowerQuality(now);
+      }
+    }
   }
 
   // getCurrentTime() arrives from the iframe by postMessage, late by a varying amount. Sampling
@@ -45,8 +101,10 @@
   function resetClock() { offsets = []; lastRaw = -1; }
   function sampleClock() {
     if (!player || !player.getCurrentTime || !player.getPlayerState) return;
+    var now = performance.now();
+    monitorBuffering(now);
     if (player.getPlayerState() !== 1) { resetClock(); return; }
-    var raw = (player.getCurrentTime() || 0) * 1000, now = performance.now();
+    var raw = (player.getCurrentTime() || 0) * 1000;
     if (raw === lastRaw) {
       if (offsets.length && now - offsets[offsets.length - 1].at > 500) offsets = [];
       return;
@@ -90,6 +148,7 @@
         },
         onStateChange: function (e) {
           if (!current(e)) return;
+          notePlayerState(e.data, performance.now());
           if (e.data === YT.PlayerState.PLAYING && !primed) {
             primed = true;
             var d = player.getDuration();
@@ -116,7 +175,7 @@
     destroyPlayer();
     document.getElementById('box').className = portrait ? 'portrait' : '';
     resetClock();
-    startAt = Math.max(0, sec); volume = v; quality = q || ''; ready = false; primed = false; error = 0; live = false;
+    startAt = Math.max(0, sec); volume = v; resetPlaybackStats(q); ready = false; primed = false; error = 0; live = false;
     if (!apiReady) { pending = { id: id, generation: generation }; return; }
     create(id, generation);
   }
@@ -135,12 +194,25 @@
     stop: function () {
       generation++; stateGeneration = null; pending = null;
       ready = false; primed = false; error = 0; live = false;
+      resetPlaybackStats('');
       destroyPlayer();
     },
     state: function () {
       var ok = !!(player && player.getPlayerState);
-      return { g: stateGeneration, r: ready, s: ok ? player.getPlayerState() : -1, t: ok ? position() : 0,
-        d: ok ? (player.getDuration() || 0) : 0, e: error || (apiFailed && stateGeneration != null ? 1 : 0), l: live };
+      var now = performance.now();
+      return {
+        g: stateGeneration,
+        r: ready,
+        s: ok ? player.getPlayerState() : -1,
+        t: ok ? position() : 0,
+        d: ok ? (player.getDuration() || 0) : 0,
+        e: error || (apiFailed && stateGeneration != null ? 1 : 0),
+        l: live,
+        q: ok && player.getPlaybackQuality ? player.getPlaybackQuality() : quality,
+        b: bufferStartedAt != null ? Math.max(0, now - bufferStartedAt) : 0,
+        stalls: stalls,
+        qc: qualityChanges
+      };
     }
   };
 
