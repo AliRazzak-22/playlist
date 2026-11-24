@@ -107,13 +107,14 @@
     return svg;
   }
 
-  function button(label, { kind = '', iconName, onClick, title, disabled, iconOnly = false, type = 'button' } = {}) {
+  function button(label, { kind = '', iconName, onClick, title, disabled, iconOnly = false, type = 'button', focusKey = null } = {}) {
     const classes = ['btn', kind, iconOnly ? 'icon-only' : ''].filter(Boolean).join(' ');
     return el('button', {
       type,
       class: classes,
       title: title || (iconOnly ? label : null),
       'aria-label': iconOnly ? label : null,
+      'data-focus-key': focusKey,
       disabled: !!disabled,
       onclick: onClick,
     }, iconName ? icon(iconName) : null, iconOnly ? null : label);
@@ -618,7 +619,12 @@
 
   function settleTab() {
     const btn = carousel.buttons[clamp(Math.round(carousel.P), 0, carousel.buttons.length - 1)];
-    btn.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+    const navRect = carousel.nav.getBoundingClientRect();
+    const buttonRect = btn.getBoundingClientRect();
+    const left = buttonRect.left - navRect.left - (carousel.nav.clientWidth - buttonRect.width) / 2;
+    if (Math.abs(left) > 1) {
+      carousel.nav.scrollBy({ left, behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+    }
   }
 
   function carouselFrame(now) {
@@ -685,10 +691,8 @@
 
     carousel.viewport.addEventListener('touchstart', (e) => {
       if (e.touches.length !== 1 || e.target.closest('input, textarea, select, .menu-list, details')) return;
-      carousel.spring = null;
       const t = e.touches[0];
       carousel.drag = { id: t.identifier, x0: t.clientX, y0: t.clientY, P0: carousel.P, locked: false, moved: 0, lastT: e.timeStamp, samples: [{ t: e.timeStamp, x: t.clientX }] };
-      kickCarousel();
     }, { passive: true });
 
     carousel.viewport.addEventListener('touchmove', (e) => {
@@ -701,7 +705,11 @@
       if (!d.locked) {
         if (Math.abs(dx) < 7 && Math.abs(dy) < 7) return;
         if (Math.abs(dy) > Math.abs(dx)) { carousel.drag = null; return; }
+        carousel.spring = null;
         d.locked = true;
+        d.P0 = carousel.P;
+        d.x0 = t.clientX;
+        d.samples = [{ t: e.timeStamp, x: t.clientX }];
       }
       e.preventDefault();
       d.moved = Math.max(d.moved, Math.abs(dx));
@@ -723,7 +731,10 @@
         carousel.viewport.addEventListener('click', suppress, { capture: true, once: true });
         setTimeout(() => carousel.viewport.removeEventListener('click', suppress, { capture: true }), 350);
       }
-      if (!d.locked) { springTo(Math.round(carousel.P)); return; }
+      if (!d.locked) {
+        if (!carousel.spring && carousel.P !== Math.round(carousel.P)) springTo(Math.round(carousel.P));
+        return;
+      }
       let v = 0;
       const t = Array.from(e.changedTouches).find((x) => x.identifier === d.id);
       if (t && e.timeStamp - d.lastT < 100 && d.samples.length >= 2) {
@@ -752,10 +763,18 @@
       placeGlider();
     });
     if (typeof ResizeObserver === 'function') {
-      const ro = new ResizeObserver(() => {
+      const ro = new ResizeObserver((entries) => {
         if (!carousel.ready) return;
-        carousel.heights = carousel.panels.map((p) => p.offsetHeight);
-        if (!carousel.drag && !carousel.spring) layoutCarousel();
+        let changed = false;
+        for (const entry of entries) {
+          const index = carousel.panels.indexOf(entry.target);
+          const height = entry.target.offsetHeight;
+          if (index >= 0 && carousel.heights[index] !== height) {
+            carousel.heights[index] = height;
+            changed = true;
+          }
+        }
+        if (changed) layoutCarousel();
       });
       carousel.panels.forEach((p) => ro.observe(p));
     }
@@ -2207,7 +2226,7 @@
     entrySettings(entry) {
       const body = el('div', { class: 'pl-item-settings-body' });
       const details = el('details', { class: 'pl-item-settings' },
-        el('summary', { class: 'btn ghost sm item-settings-toggle' },
+        el('summary', { class: 'btn ghost sm item-settings-toggle', 'data-focus-key': `${entry.id}:settings` },
           icon('sliders'),
           el('span', { text: entry.kind === 'video' ? 'إعدادات الفيديو والإطار' : 'إعدادات العنصر' }),
           entry.kind === 'video' && (entry.frame_url || entry.frame_left_url || entry.frame_right_url)
@@ -2215,6 +2234,7 @@
           entry.kind !== 'image' && entry.volume !== 1 ? pill(`صوت ${Math.round(entry.volume * 100)}%`, 'muted') : null),
         body);
       let built = false;
+      details.open = this.openSettings.has(entry.id);
       const build = () => {
         if (built) return;
         built = true;
@@ -2398,6 +2418,18 @@
     }
 
     render(preserveList = false) {
+      const rootTop = this.root.getBoundingClientRect().top + scrollY;
+      const focused = this.root.contains(document.activeElement) ? document.activeElement : null;
+      const focusId = focused?.dataset.focusKey;
+      const items = Array.from(this.list.querySelectorAll('.pl-item[data-entry-id]'));
+      const anchor = items.find((item) => {
+        const rect = item.getBoundingClientRect();
+        return rect.bottom > 0 && rect.top < innerHeight;
+      })
+        || items[0]
+        || null;
+      const anchorId = anchor?.dataset.entryId;
+      const anchorOffset = anchor ? anchor.getBoundingClientRect().top + scrollY - rootTop : null;
       this.notice.hidden = !(this.dirty && this.conflict);
       this.notice.replaceChildren(
         el('span', { text: 'القائمة تغيّرت من مكان ثاني وانت جاي تعدّل. إذا تحفظ، راح تكتب تعديلك فوقها.' }),
@@ -2409,17 +2441,17 @@
         } else {
           const last = this.items.length - 1;
           this.list.replaceChildren(el('ol', { class: 'pl-list' }, this.items.map((entry, i) => {
-            return el('li', { class: 'pl-item media-item' },
+            return el('li', { class: 'pl-item media-item', 'data-entry-id': entry.id },
               el('div', { class: 'media-row' },
                 el('span', { class: 'pl-num', text: String(i + 1) }),
                 el('div', { class: 'pl-info' },
                   el('strong', { title: entry.name, text: entry.name }),
                   el('small', { text: entry.kind === 'image' ? 'صورة' : `${KIND_LABELS[entry.kind]} · ${entry.duration_ms ? clock(entry.duration_ms) : 'المدة من الشاشة'}` })),
                 el('div', { class: 'pl-actions' },
-                  button('معاينة', { kind: 'ghost sm', iconName: 'eye', iconOnly: true, onClick: () => previewMedia(entry) }),
-                  button('لفوق', { kind: 'ghost sm', iconName: 'up', iconOnly: true, disabled: i === 0, onClick: () => this.move(i, -1) }),
-                  button('لجوة', { kind: 'ghost sm', iconName: 'down', iconOnly: true, disabled: i === last, onClick: () => this.move(i, 1) }),
-                  button('حذف', { kind: 'danger sm', iconName: 'trash', iconOnly: true, onClick: () => this.remove(i) }))),
+                  button('معاينة', { kind: 'ghost sm', iconName: 'eye', iconOnly: true, focusKey: `${entry.id}:preview`, onClick: () => previewMedia(entry) }),
+                  button('لفوق', { kind: 'ghost sm', iconName: 'up', iconOnly: true, focusKey: `${entry.id}:up`, disabled: i === 0, onClick: () => this.move(i, -1) }),
+                  button('لجوة', { kind: 'ghost sm', iconName: 'down', iconOnly: true, focusKey: `${entry.id}:down`, disabled: i === last, onClick: () => this.move(i, 1) }),
+                  button('حذف', { kind: 'danger sm', iconName: 'trash', iconOnly: true, focusKey: `${entry.id}:delete`, onClick: () => this.remove(i) }))),
               this.entrySettings(entry));
           })));
         }
@@ -2440,6 +2472,39 @@
             disabled: !this.dirty || this.saving,
             onClick: () => this.save(),
           })));
+      let current = null;
+      if (!preserveList) {
+        const currentTop = this.root.getBoundingClientRect().top + scrollY;
+        if (anchorId) {
+          current = this.list.querySelector(`.pl-item[data-entry-id="${CSS.escape(anchorId)}"]`);
+          if (!current) {
+            current = Array.from(this.list.querySelectorAll('.pl-item[data-entry-id]')).reduce((nearest, item) => {
+              if (!nearest) return item;
+              const distance = Math.abs(item.getBoundingClientRect().top + scrollY - currentTop - anchorOffset);
+              const nearestDistance = Math.abs(nearest.getBoundingClientRect().top + scrollY - currentTop - anchorOffset);
+              return distance < nearestDistance ? item : nearest;
+            }, null);
+          }
+        } else if (anchorOffset != null && this.list.scrollHeight) {
+          this.list.scrollTop = anchorOffset;
+        }
+      }
+
+      if (focusId) {
+        let target = Array.from(this.root.querySelectorAll('[data-focus-key]')).find((node) => node.dataset.focusKey === focusId);
+        if ((!target || target.disabled) && current) {
+          const action = focusId.slice(focusId.lastIndexOf(':') + 1);
+          target = Array.from(current.querySelectorAll('[data-focus-key]')).find((node) => !node.disabled && node.dataset.focusKey === `${current.dataset.entryId}:${action}`)
+            || current.querySelector('[data-focus-key$=":preview"]');
+        }
+        if (target && !target.disabled) target.focus({ preventScroll: true });
+        else focused?.isConnected && focused.focus({ preventScroll: true });
+      } else if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+
+      if (!preserveList && current && anchorOffset != null) {
+        const currentTop = this.root.getBoundingClientRect().top + scrollY;
+        scrollBy(0, current.getBoundingClientRect().top + scrollY - currentTop - anchorOffset);
+      }
       this.updateAutoStatus();
     }
   }
